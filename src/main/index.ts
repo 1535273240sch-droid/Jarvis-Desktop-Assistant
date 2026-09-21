@@ -400,6 +400,58 @@ async function runSelfTest(): Promise<void> {
       const pImg = await panelWindow.webContents.capturePage();
       fs.writeFileSync(path.join(shotsDir, "panel.png"), pImg.toPNG());
       logger.info(`  ✓ 面板截图已保存到 ${shotsDir}`);
+
+      // 展开「设置与状态」后再截一张：视觉自定义/执行模式/音色等配置项
+      // 都折叠在这个区域里，展开截图才能作为"设置确实存在"的取证。
+      try {
+        await panelWindow.webContents.executeJavaScript(
+          `(() => { const d = document.querySelector('details.settings'); if (d) d.open = true; return true; })()`
+        );
+        await new Promise((r) => setTimeout(r, 500));
+        const pImg2 = await panelWindow.webContents.capturePage();
+        fs.writeFileSync(path.join(shotsDir, "panel-settings.png"), pImg2.toPNG());
+        logger.info(`  ✓ 设置面板展开截图已保存（含视觉自定义/音色/执行模式）`);
+
+        // 再滚到「屏幕理解」区域单独截一张，证明视觉自定义端点/模型/专属 Key 均可配置
+        const scrollInfo = await panelWindow.webContents.executeJavaScript(
+          `(() => {
+             const body = document.querySelector('details.settings .body');
+             if (!body) return { ok: false, reason: '设置内容区不存在' };
+             const el = document.getElementById('visionPreset');
+             if (!el) return { ok: false, reason: 'visionPreset 不存在' };
+             el.scrollIntoView({ block: 'center' });
+             return {
+               ok: true,
+               scrollHeight: body.scrollHeight,
+               clientHeight: body.clientHeight,
+               canScroll: body.scrollHeight > body.clientHeight,
+               scrollTop: body.scrollTop,
+             };
+           })()`
+        );
+        logger.info(`  · 设置区滚动能力：${JSON.stringify(scrollInfo)}`);
+        await new Promise((r) => setTimeout(r, 500));
+        const pImg3 = await panelWindow.webContents.capturePage();
+        fs.writeFileSync(path.join(shotsDir, "panel-vision-settings.png"), pImg3.toPNG());
+        logger.info(`  ✓ 视觉自定义设置截图已保存`);
+
+        // 再滑到最底部，确认最后一项（视觉专属 Key / 执行模式）也能触达
+        const bottomInfo = await panelWindow.webContents.executeJavaScript(
+          `(() => {
+             const body = document.querySelector('details.settings .body');
+             if (!body) return { ok: false };
+             body.scrollTop = body.scrollHeight;
+             return { ok: true, scrollTop: body.scrollTop, maxScroll: body.scrollHeight - body.clientHeight };
+           })()`
+        );
+        logger.info(`  · 滑到设置底部：${JSON.stringify(bottomInfo)}`);
+        await new Promise((r) => setTimeout(r, 500));
+        const pImg4 = await panelWindow.webContents.capturePage();
+        fs.writeFileSync(path.join(shotsDir, "panel-settings-bottom.png"), pImg4.toPNG());
+        logger.info(`  ✓ 设置区底部截图已保存（验证可滑到底）`);
+      } catch (e) {
+        logger.warn("  · 设置面板展开截图失败:", (e as Error).message);
+      }
     }
     check(true, "可视化取证截图已生成");
   } catch (e) {
