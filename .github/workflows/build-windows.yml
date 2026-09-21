@@ -11,6 +11,11 @@ permissions:
 jobs:
   build:
     runs-on: windows-latest
+    env:
+      # 若在仓库 Secrets 里配置了 WIN_CSC_LINK(证书 base64/路径) 与 WIN_CSC_KEY_PASSWORD，
+      # electron-builder 会自动对安装包签名；未配置则跳过签名正常构建(带未签名警告)。
+      CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+      CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -23,6 +28,13 @@ jobs:
 
       - name: Enable pnpm (for vendor/orb)
         run: corepack enable && corepack prepare pnpm@11.19.0 --activate
+
+      - name: Read version from package.json
+        id: version
+        shell: pwsh
+        run: |
+          $v = (node -p "require('./package.json').version")
+          echo "VERSION=$v" >> $env:GITHUB_OUTPUT
 
       - name: Install main dependencies
         run: npm ci
@@ -41,21 +53,21 @@ jobs:
       - name: Upload installer as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Jarvis-Setup-v1.0.0
+          name: Jarvis-Setup-v${{ steps.version.outputs.VERSION }}
           path: release/*.exe
           if-no-files-found: error
 
-      - name: Publish GitHub Release (v1.0.0)
+      - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.0
-          name: "Jarvis v1.0.0"
+          tag_name: v${{ steps.version.outputs.VERSION }}
+          name: "Jarvis v${{ steps.version.outputs.VERSION }}"
           body: |
-            ## Jarvis v1.0.0
+            ## Jarvis v${{ steps.version.outputs.VERSION }}
 
             Windows 11 桌面 AI 助手（WebGPU 悬浮球 + 实时语音 + 工具执行 + 屏幕视觉）。
 
-            自动构建的安装包，点击下载 `Jarvis-Setup-1.0.0-x64.exe`。
+            自动构建的安装包，点击下载 `Jarvis-Setup-${{ steps.version.outputs.VERSION }}-x64.exe`。
           files: release/*.exe
           draft: false
           prerelease: false
