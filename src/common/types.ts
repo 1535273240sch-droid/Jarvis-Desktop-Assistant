@@ -117,6 +117,8 @@ export interface VisionResult {
 
 /** 运行时可调配置（保存在 userData/config.json） */
 export interface JarvisConfig {
+  /** 配置结构版本，用于一次性迁移旧配置（当前为 2：全自动执行模式） */
+  configVersion?: number;
   apiKey: string;
   realtimeModel: string;
   realtimeBaseUrl: string;

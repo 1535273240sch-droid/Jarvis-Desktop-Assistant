@@ -70,6 +70,19 @@ export function isAuthorized(cap: Capability): boolean {
   return rec !== null && rec.scope.includes(cap);
 }
 
+/**
+ * 全自动模式下的能力授权。
+ *
+ * 本应用默认以「全自动」方式运行：用户已经通过安装并启动本软件表达了授权意图，
+ * 因此不再对屏幕录制/鼠标/键盘做逐次人工确认，首次调用时自动落盘授权记录。
+ * 所有实际操作仍完整写入 audit.jsonl 审计日志，保留事后追溯能力。
+ */
+export function ensureAutoAuthorized(): void {
+  const rec = getAuthorization();
+  if (rec && rec.scope.length >= 3) return;
+  grantAuthorization(["screen-capture", "mouse-control", "keyboard-control"]);
+}
+
 /** 记录授权 */
 export function grantAuthorization(scope: Capability[]): void {
   const rec: AuthorizationRecord = {

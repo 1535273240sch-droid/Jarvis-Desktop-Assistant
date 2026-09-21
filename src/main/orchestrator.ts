@@ -10,7 +10,7 @@ import { safetyManager } from "./safety";
 import { orbController } from "./orb-control";
 import { configManager } from "./config";
 import { onEmergencyStopInterrupt } from "./emergency-stop";
-import { isAuthorized } from "./authorization";
+import { isAuthorized, ensureAutoAuthorized } from "./authorization";
 import { IPC } from "../common/types";
 import type { AssistantState, SessionStatus, ToolCallView } from "../common/types";
 
@@ -248,9 +248,30 @@ class Orchestrator {
   }
 
   stopSession(): void {
+    // 顺序很重要：先让渲染进程立刻静音并停掉麦克风采集，
+    // 再断服务端连接，最后收敛状态。否则已排入播放队列的音频会继续响。
+    this.broadcast(IPC.AUDIO_FLUSH, {});
+    this.broadcast(IPC.AUDIO_STATE, { capture: false, playback: false });
     realtimeClient.disconnect();
     this.started = false;
+    orbController.setAudioBands().catch(() => undefined);
     stateMachine.transition("idle", "会话已停止", { force: true });
+  }
+
+  /**
+   * 进程退出前的彻底静音与清理。
+   * 面板隐藏/退出时若只断 WebSocket，渲染进程播放队列里已排定的音频仍会继续出声，
+   * 这里显式清空，确保"退出了就不该再说话"。
+   */
+  shutdown(): void {
+    try {
+      this.broadcast(IPC.AUDIO_FLUSH, {});
+      this.broadcast(IPC.AUDIO_STATE, { capture: false, playback: false });
+    } catch {
+      /* 窗口可能已销毁，忽略 */
+    }
+    realtimeClient.disconnect();
+    this.started = false;
   }
 
   isStarted(): boolean {
@@ -385,19 +406,24 @@ class Orchestrator {
 
       case "close_current_window": {
         if (!isAuthorized("keyboard-control")) {
-          return { ok: false, output: "关闭窗口需要「键盘控制」授权（会发送 Alt+F4）。请在设置中完成首次使用授权。" };
+          ensureAutoAuthorized();
         }
         const win = await visionManager.getActiveWindow();
         if (!win) return { ok: false, output: "当前没有可操作的前台窗口（焦点可能在桌面）。" };
-        const confirmed = await safetyManager.requestConfirmation({
-          requestId: `cfm_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
-          riskLevel: "high",
-          actionType: "desktop_control",
-          title: "关闭当前窗口",
-          target: `${win.title}（${win.processName}）`,
-          explanation: `将关闭当前前台窗口「${win.title}」（进程 ${win.processName}）。未保存的内容可能丢失，请确认。`,
-        });
-        if (!confirmed) return { ok: false, output: "用户拒绝了关闭窗口的操作。" };
+        const cfgClose = configManager.get();
+        if (cfgClose.confirmHighRisk) {
+          const confirmed = await safetyManager.requestConfirmation({
+            requestId: `cfm_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
+            riskLevel: "high",
+            actionType: "desktop_control",
+            title: "关闭当前窗口",
+            target: `${win.title}（${win.processName}）`,
+            explanation: `将关闭当前前台窗口「${win.title}」（进程 ${win.processName}）。未保存的内容可能丢失，请确认。`,
+          });
+          if (!confirmed) return { ok: false, output: "用户拒绝了关闭窗口的操作。" };
+        } else {
+          safetyManager.audit("auto_approved", { action: "close_current_window", title: win.title });
+        }
         const msg = await desktopController.pressKeys("alt+f4");
         safetyManager.audit("close_current_window", { title: win.title, processName: win.processName, confirmed: true });
         return { ok: !msg.includes("拒绝"), output: `已请求关闭窗口「${win.title}」：${msg}` };

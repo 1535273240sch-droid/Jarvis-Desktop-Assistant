@@ -14,7 +14,7 @@ import { mcpClient } from "./mcp";
 import { visionManager } from "./vision";
 import { desktopController } from "./desktop-control";
 import { armEmergencyStop, disposeEmergencyStop } from "./emergency-stop";
-import { isAuthorized } from "./authorization";
+import { isAuthorized, ensureAutoAuthorized } from "./authorization";
 import { registerIpcHandlers } from "./ipc";
 import { ASSISTANT_STATES, IPC } from "../common/types";
 import type { AssistantState } from "../common/types";
@@ -114,9 +114,12 @@ function createPanelWindow(): BrowserWindow {
   win.loadURL("app://panel/panel.html");
 
   win.on("close", (e) => {
-    // 关闭面板时最小化到托盘，而不是退出应用
+    // 关闭面板时最小化到托盘，而不是退出应用。
+    // 但必须同时**立刻停止语音会话**：否则面板隐藏后 AI 仍在后台继续说话，
+    // 用户会看到"界面已经关了，它还在出声"。
     if (!(app as any).isQuitting) {
       e.preventDefault();
+      orchestrator.stopSession();
       win.hide();
     }
   });
@@ -435,6 +438,11 @@ app.whenReady().then(async () => {
   // 3) 让安全模块知道去哪个窗口弹确认框
   safetyManager.setPanelResolver(() => panelWindow);
 
+  // 3b) 全自动模式：启动即授予屏幕/鼠标/键盘能力，之后不再逐次打断用户。
+  //     所有实际操作仍写入 audit.jsonl，可事后追溯。
+  ensureAutoAuthorized();
+  logger.info("[Authorization] 全自动模式：已授予屏幕录制/鼠标控制/键盘控制能力");
+
   // 4) 编排器与 IPC
   orchestrator.init(() => panelWindow);
   registerIpcHandlers({
@@ -500,6 +508,9 @@ app.whenReady().then(async () => {
 
 app.on("before-quit", () => {
   (app as any).isQuitting = true;
+  // 先彻底静音（清空渲染进程播放队列），再断连接。
+  // 顺序反了会出现"程序要退了，声音还拖着响完"的现象。
+  orchestrator.shutdown();
   disposeEmergencyStop();
   desktopController.destroy();
   mcpClient.stop();

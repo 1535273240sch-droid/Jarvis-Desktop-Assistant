@@ -476,17 +476,15 @@
           <label>助手语音音色调节</label>
           <div class="row">
             <select id="voiceSelect">
-              <option value="cixingnansheng">磁性男声 (推荐默认)</option>
-              <option value="zhengpaiqingnian">正派青年</option>
-              <option value="wenrounvsheng">温柔女声</option>
-              <option value="tianmeinvsheng">甜美女声</option>
-              <option value="qingnianyin">清爽青年</option>
+              <option value="cixingnansheng">磁性男声（实测可用·默认）</option>
+              <option value="zhengpaiqingnian">正派青年（实测可用）</option>
+              <option value="wenrounvsheng">温柔女声（实测可用）</option>
               <option value="custom">自定义音色代码...</option>
             </select>
             <input id="customVoiceInput" placeholder="输入自定义音色ID" style="display:none; max-width: 140px;" />
             <button id="btnSaveVoice">应用</button>
           </div>
-          <div class="hint">可随时切换模型支持的音色，保存后对后续回复生效。</div>
+          <div class="hint">上列三项为当前账号<b>实测被服务端接受</b>的音色；填入其他值会被服务端以 “voice ... is not valid” 拒绝。</div>
         </div>
 
         <div class="field">
@@ -505,6 +503,22 @@
             <button id="btnSaveRtUrl">应用</button>
           </div>
           <div class="hint">接口与模型必须匹配：若用 <code>step_plan</code> 通道，模型要选该通道内的型号，否则会返回 404。</div>
+        </div>
+
+        <div class="field">
+          <label>屏幕理解模型（可选列表，支持自定义）</label>
+          <div class="row">
+            <select id="visionPreset">
+              <option value="https://api.stepfun.com/step_plan/v1/chat/completions|step-5-preview">StepFun step-5-preview（视觉+推理，慢但准）</option>
+              <option value="https://api.stepfun.com/step_plan/v1/chat/completions|step-3.7-flash">StepFun step-3.7-flash（更快）</option>
+              <option value="https://api.stepfun.com/v1/chat/completions|step-1o-turbo-vision">StepFun step-1o-turbo-vision</option>
+              <option value="https://api.openai.com/v1/chat/completions|gpt-4o">OpenAI gpt-4o（自定义Key）</option>
+              <option value="https://api.anthropic.com/v1/chat/completions|claude-3-5-sonnet">Claude 3.5 Sonnet（自定义Key）</option>
+              <option value="custom">自定义（自填端点与模型）...</option>
+            </select>
+            <button id="btnApplyVisionPreset">应用</button>
+          </div>
+          <div class="hint">选择预设会同时填入下方的「模型 ID」与「接口地址」；选「自定义」可接任意兼容 OpenAI 规范的第三方或本地视觉服务。</div>
         </div>
 
         <div class="field">
@@ -532,6 +546,18 @@
             <button id="btnSaveVisionKey">保存</button>
           </div>
           <div class="hint" id="visionKeyHint">未单独配置，默认沿用主 Key</div>
+        </div>
+
+        <div class="field">
+          <label>执行模式</label>
+          <div class="row">
+            <select id="execMode">
+              <option value="auto">全自动（推荐）：直接执行，不打断，仅记录审计日志</option>
+              <option value="confirm">逐次确认：高危操作弹窗等用户批准</option>
+            </select>
+            <button id="btnSaveExecMode">应用</button>
+          </div>
+          <div class="hint">全自动模式下，打开软件、读写文件、执行命令、点屏幕等操作都会直接执行；所有行为仍完整写入 <code>audit.jsonl</code> 供事后追溯。按 <code>Ctrl+Alt+X</code> 可随时急停。</div>
         </div>
 
         <div class="field">
@@ -1055,7 +1081,7 @@ async function loadConfig() {
     
     // 音色回显
     const voiceVal = c.voice || 'cixingnansheng';
-    const voiceOptions = ['cixingnansheng', 'zhengpaiqingnian', 'wenrounvsheng', 'tianmeinvsheng', 'qingnianyin'];
+    const voiceOptions = ['cixingnansheng', 'zhengpaiqingnian', 'wenrounvsheng'];
     if (voiceOptions.includes(voiceVal)) {
       $('voiceSelect').value = voiceVal;
       $('customVoiceInput').style.display = 'none';
@@ -1074,6 +1100,7 @@ async function loadConfig() {
       : '未单独配置，默认沿用主 API Key';
 
     $('allowedDirs').value = (c.allowedDirectories || []).join('\n');
+    $('execMode').value = c.confirmHighRisk ? 'confirm' : 'auto';
     $('cfgPath').textContent = c.configPath || '未知';
     $('mcpStatus').textContent = (c.mcp && c.mcp.ready)
       ? ('已就绪，' + c.mcp.toolCount + ' 个工具')
@@ -1124,6 +1151,15 @@ $('btnSaveRtUrl').onclick = async () => {
   loadConfig();
 };
 
+$('btnApplyVisionPreset').onclick = async () => {
+  const v = $('visionPreset').value;
+  if (v === 'custom') { toast('请直接编辑下方「模型 ID」与「接口地址」后点各自的「应用」'); return; }
+  const [url, model] = v.split('|');
+  await api.setConfig({ visionBaseUrl: url, visionModel: model });
+  toast('视觉配置已应用：' + model);
+  loadConfig();
+};
+
 $('btnSaveVision').onclick = async () => {
   await api.setConfig({ visionModel: $('visionModel').value.trim() });
   toast('屏幕理解模型已更新');
@@ -1141,6 +1177,13 @@ $('btnSaveVisionKey').onclick = async () => {
   await api.setConfig({ visionApiKey: v });
   $('visionApiKey').value = '';
   toast(v ? '视觉专属 Key 已保存' : '已清除独立视觉 Key，沿用主 Key');
+  loadConfig();
+};
+
+$('btnSaveExecMode').onclick = async () => {
+  const auto = $('execMode').value === 'auto';
+  await api.setConfig({ confirmHighRisk: !auto, allowSensitiveInput: auto });
+  toast(auto ? '已切换为全自动执行模式' : '已切换为逐次确认模式');
   loadConfig();
 };
 

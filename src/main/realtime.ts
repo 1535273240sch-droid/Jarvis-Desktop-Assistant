@@ -52,6 +52,10 @@ export class RealtimeClient extends EventEmitter {
   private expectNoResponseToCancel = false;
   private connecting = false;
   private intentionalClose = false;
+  /** 当前是否有进行中的响应（用于避免 response.create 冲突） */
+  private responseActive = false;
+  /** 有进行中的响应时挂起的生成请求，待 response.done 后补发 */
+  private pendingResponseRequest = false;
 
   /** 本轮响应内待处理的工具调用累积（function_call 的 arguments 是流式拼接的） */
   private pendingToolCalls = new Map<string, { name: string; argsBuffer: string; itemId: string }>();
@@ -281,7 +285,7 @@ export class RealtimeClient extends EventEmitter {
         content: [{ type: "input_text", text }],
       },
     });
-    this.send({ type: "response.create", response: { modalities: ["text", "audio"] } });
+    this.requestResponse();
   }
 
   /** 工具执行结果回注，并要求模型继续 */
@@ -294,6 +298,26 @@ export class RealtimeClient extends EventEmitter {
         output,
       },
     });
+    this.requestResponse();
+  }
+
+  /**
+   * 请求模型继续生成。
+   *
+   * 关键时序（实测踩过的坑）：模型在流式产出 function_call 的同一轮里，
+   * 上一轮 response 可能尚未结束（还没收到 response.done）。此时立即发
+   * response.create 会被服务端以 `invalid_request_error: ongoing response
+   * already exists` 拒绝，导致工具结果回注后模型永远不继续说话。
+   *
+   * 因此这里跟踪当前是否已有进行中的响应：有则挂起，等 response.done 到达后自动补发。
+   */
+  private requestResponse(): void {
+    if (this.responseActive) {
+      this.pendingResponseRequest = true;
+      logger.info("[Realtime] 已有进行中的响应，已排队等待其结束后再请求生成");
+      return;
+    }
+    this.responseActive = true;
     this.send({ type: "response.create", response: { modalities: ["text", "audio"] } });
   }
 
@@ -343,6 +367,7 @@ export class RealtimeClient extends EventEmitter {
       case "response.created":
         this.assistantMsgId = sessionStore.createAssistantPlaceholder();
         this.pendingToolCalls.clear();
+        this.responseActive = true;
         this.emit("responseCreated");
         break;
 
@@ -441,7 +466,16 @@ export class RealtimeClient extends EventEmitter {
         break;
 
       case "response.done":
+        this.responseActive = false;
         this.emit("responseDone");
+        // 若期间有被挂起的生成请求（典型场景：工具结果回注撞上上一轮响应），
+        // 此刻上一轮已结束，立即补发，让模型接着把工具结果总结出来。
+        if (this.pendingResponseRequest) {
+          this.pendingResponseRequest = false;
+          this.responseActive = true;
+          logger.info("[Realtime] 上一轮响应已结束，补发挂起的生成请求");
+          this.send({ type: "response.create", response: { modalities: ["text", "audio"] } });
+        }
         break;
 
       case "error": {
@@ -459,6 +493,14 @@ export class RealtimeClient extends EventEmitter {
         // 但若因外部调用发生，降级为警告而不是错误
         if (/commit when server vad/i.test(String(e.message || ""))) {
           logger.warn("[Realtime] server_vad 模式下不应 commit（已忽略该回执）");
+          break;
+        }
+
+        // 情况 3：已有进行中的响应时又请求生成 —— 属正常时序竞争，
+        // 已由 requestResponse() 排队机制处理，这里仅记录并等待自动补发
+        if (/ongoing response already exists/i.test(String(e.message || ""))) {
+          this.responseActive = true;
+          logger.info("[Realtime] 已有进行中的响应（正常，结果将在其结束后自动补发）");
           break;
         }
 

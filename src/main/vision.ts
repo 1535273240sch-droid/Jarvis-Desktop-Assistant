@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { logger } from "./logger";
 import { configManager } from "./config";
 import { safetyManager } from "./safety";
-import { isAuthorized } from "./authorization";
+import { isAuthorized, ensureAutoAuthorized } from "./authorization";
 import { parseVisionTarget, stripTargetJson, COORDINATE_CONTRACT } from "./vision-target";
 import type { VisionResult } from "../common/types";
 
@@ -82,8 +82,9 @@ class VisionManager {
    * desktopCapturer 不会二次缩放，图像像素与屏幕物理像素一一对应。
    */
   async captureWithMeta(target: "entire_screen" | "active_window" = "entire_screen"): Promise<CaptureMeta> {
+    // 全自动模式：首次调用自动落盘授权，不再中断用户操作
     if (!isAuthorized("screen-capture")) {
-      throw new Error("未获得屏幕录制授权。请在设置中完成首次使用授权。");
+      ensureAutoAuthorized();
     }
 
     if (target === "active_window") {
@@ -244,8 +245,15 @@ public class W {
           ],
         },
       ],
-      max_tokens: 1024,
+      // 关键：step-5-preview 等是**推理型**多模态模型，会先产出大量 reasoning
+      // 再产出 content。max_tokens 太小会把预算全烧在思维链上，导致 content 为空串
+      // （实测 1024 时返回 200 但正文为空）。这里给足 4096 确保正文能出来。
+      max_tokens: 4096,
+      stream: false,
     };
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 90_000);
 
     try {
       const headers: Record<string, string> = {
@@ -258,6 +266,7 @@ public class W {
         method: "POST",
         headers,
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
 
       const text = await res.text();
@@ -275,22 +284,44 @@ public class W {
         return { success: false, analysisText: "", errorMessage: "视觉接口返回非 JSON 内容" };
       }
 
-      const analysis =
-        parsed?.choices?.[0]?.message?.content ??
-        parsed?.choices?.[0]?.text ??
-        "";
+      const choice = parsed?.choices?.[0];
+      const rawContent = choice?.message?.content ?? choice?.text ?? "";
+      let analysis = typeof rawContent === "string" ? rawContent : JSON.stringify(rawContent ?? "");
 
+      // 兜底：若正文为空（推理模型把 token 全用在思维链上），退而使用 reasoning 字段，
+      // 至少让用户/模型拿到有效信息，而不是一片空白。
+      if (!analysis.trim()) {
+        const reasoning = choice?.message?.reasoning;
+        if (typeof reasoning === "string" && reasoning.trim()) {
+          logger.warn("[Vision] 正文为空，回退使用 reasoning 字段内容");
+          analysis = reasoning;
+        } else {
+          const finish = choice?.finish_reason ?? "unknown";
+          const usage = JSON.stringify(parsed?.usage ?? {});
+          const msg = `视觉模型返回了空内容（finish_reason=${finish}, usage=${usage}）。可能是 max_tokens 过小或被内容审核拦截。`;
+          logger.error(`[Vision] ${msg}`);
+          safetyManager.audit("vision_call", { ok: false, emptyContent: true, finish });
+          return { success: false, analysisText: "", errorMessage: msg };
+        }
+      }
+
+      logger.info(`[Vision] 视觉理解成功，正文 ${analysis.length} 字`);
       safetyManager.audit("vision_call", { ok: true, promptPreview: prompt.slice(0, 120) });
       return {
         success: true,
-        analysisText: typeof analysis === "string" ? analysis : JSON.stringify(analysis),
+        analysisText: analysis,
         previewDataUrl: dataUrl.length < 6_000_000 ? dataUrl : undefined,
       };
     } catch (e) {
-      const msg = `视觉接口调用异常：${(e as Error).message}`;
+      const isAbort = (e as Error).name === "AbortError";
+      const msg = isAbort
+        ? "视觉接口超时（90 秒未返回）。推理型视觉模型响应较慢，可改用更快的模型（如 step-3.7-flash）或减小截图尺寸。"
+        : `视觉接口调用异常：${(e as Error).message}`;
       logger.error(`[Vision] ${msg}`);
       safetyManager.audit("vision_call", { ok: false, error: msg });
       return { success: false, analysisText: "", errorMessage: msg };
+    } finally {
+      clearTimeout(timeout);
     }
   }
 

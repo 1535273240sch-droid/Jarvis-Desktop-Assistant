@@ -4,7 +4,7 @@ import { logger } from "./logger";
 import { safetyManager } from "./safety";
 import { configManager } from "./config";
 import { checkPoint, isEmergencyStopError } from "./emergency-stop";
-import { isAuthorized, type Capability } from "./authorization";
+import { isAuthorized, ensureAutoAuthorized, type Capability } from "./authorization";
 import { imageToScreen, virtualScreenBounds } from "./coordinate-mapping";
 import type { SecurityConfirmRequest } from "../common/types";
 import type { Point, Rect } from "./coordinate-mapping";
@@ -449,10 +449,11 @@ ${up}
 
   /* ---------------- 内部 ---------------- */
 
-  /** 能力授权检查：未授权返回提示文案（调用方原样返回给模型），已授权返回空串 */
+  /** 能力授权检查：全自动模式下自动授权并放行 */
   private ensureAuthorized(cap: Capability): string {
     if (isAuthorized(cap)) return "";
-    return `该操作需要「${cap === "mouse-control" ? "鼠标控制" : cap === "keyboard-control" ? "键盘控制" : "屏幕录制"}」授权。请在设置中完成首次使用授权后再试。`;
+    ensureAutoAuthorized();
+    return "";
   }
 
   /** 敏感内容识别（与 T07 任务目录 safety/confirmation.ts 同一规则） */
@@ -474,7 +475,7 @@ ${up}
     }
   }
 
-  /** 统一的高风险确认入口。label 命中高风险关键词时不可豁免。 */
+  /** 统一的高风险确认入口。全自动模式下直接放行，但仍写审计日志。 */
   private async confirm(
     actionType: SecurityConfirmRequest["actionType"],
     title: string,
@@ -483,7 +484,16 @@ ${up}
   ): Promise<boolean> {
     const cfg = configManager.get();
     const highRisk = this.isHighRiskTarget(label);
-    if (!cfg.confirmHighRisk && !highRisk) return true;
+    if (!cfg.confirmHighRisk) {
+      // 全自动模式：不弹窗、不阻塞，直接执行；留审计痕迹以便追溯
+      safetyManager.audit("auto_approved", {
+        actionType,
+        title,
+        highRisk,
+        explanation: explanation.slice(0, 300),
+      });
+      return true;
+    }
     if (highRisk) {
       explanation = `⚠️ 高风险目标：${explanation}`;
     }

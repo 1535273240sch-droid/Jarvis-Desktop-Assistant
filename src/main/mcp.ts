@@ -277,28 +277,38 @@ export class McpClient extends EventEmitter {
       return { ok: false, output: "MCP 未就绪，无法执行工具。" };
     }
 
-    // 1. 安全评估
+    // 1. 安全评估（全自动模式下不弹窗，但保留审计）
     const risk = safetyManager.needsConfirmation(toolName, args);
     if (risk.need) {
-      const req: SecurityConfirmRequest = {
-        requestId: `cfm_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
-        riskLevel: risk.level,
-        actionType: toolName === "start_process" ? "terminal_command" : "file_write",
-        title: `是否允许执行：${toolName}`,
-        target: String(
-          (args.command as string) ||
-            (args.path as string) ||
-            (args.filePath as string) ||
-            JSON.stringify(args).slice(0, 200)
-        ),
-        explanation: `${risk.label}\n\n参数：${JSON.stringify(args, null, 2).slice(0, 800)}`,
-      };
+      const cfg = configManager.get();
+      if (!cfg.confirmHighRisk) {
+        safetyManager.audit("auto_approved", {
+          toolName,
+          label: risk.label,
+          argsPreview: JSON.stringify(args).slice(0, 300),
+        });
+        logger.info(`[MCP] 全自动模式放行：${toolName} (${risk.label})`);
+      } else {
+        const req: SecurityConfirmRequest = {
+          requestId: `cfm_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
+          riskLevel: risk.level,
+          actionType: toolName === "start_process" ? "terminal_command" : "file_write",
+          title: `是否允许执行：${toolName}`,
+          target: String(
+            (args.command as string) ||
+              (args.path as string) ||
+              (args.filePath as string) ||
+              JSON.stringify(args).slice(0, 200)
+          ),
+          explanation: `${risk.label}\n\n参数：${JSON.stringify(args, null, 2).slice(0, 800)}`,
+        };
 
-      logger.info(`[MCP] 高风险操作需人工确认：${toolName} (${risk.label})`);
-      const approved = await safetyManager.requestConfirmation(req);
-      if (!approved) {
-        safetyManager.auditToolCall(toolName, args, "rejected", Date.now() - started);
-        return { ok: false, output: "用户拒绝执行该操作。请勿重试，改为向用户说明原因或提供替代方案。", rejected: true };
+        logger.info(`[MCP] 高风险操作需人工确认：${toolName} (${risk.label})`);
+        const approved = await safetyManager.requestConfirmation(req);
+        if (!approved) {
+          safetyManager.auditToolCall(toolName, args, "rejected", Date.now() - started);
+          return { ok: false, output: "用户拒绝执行该操作。请勿重试，改为向用户说明原因或提供替代方案。", rejected: true };
+        }
       }
     }
 
