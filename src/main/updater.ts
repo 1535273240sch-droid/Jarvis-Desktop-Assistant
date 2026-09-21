@@ -9,9 +9,9 @@ import { configManager } from "./config";
  * 依赖 electron-builder 的 `publish: github` 配置 + GitHub Releases。
  * 每次启动后静默检查新版本；发现新版自动后台下载，下载完成后弹窗询问是否重启安装。
  *
- * 注意：本应用仓库为私有（private），electron-updater 访问 GitHub Release 需要 token，
- * 优先级：环境变量 GH_TOKEN / GITHUB_TOKEN > config.json 的 `githubToken` 字段。
- * 未提供 token 时，更新检查会失败，我们仅记录日志、不打断用户。
+ * 仓库为公开（public）时，访问 GitHub Releases 无需 token；
+ * 若仓库改回私有，可设置环境变量 GH_TOKEN / GITHUB_TOKEN，或在本地 config.json 增加 `githubToken` 字段。
+ * 未提供 token 时仅记录日志，不打断用户。
  */
 
 let panelResolver: () => BrowserWindow | null = () => null;
@@ -19,12 +19,11 @@ let panelResolver: () => BrowserWindow | null = () => null;
 function resolveToken(): string {
   const envToken = process.env.GH_TOKEN || process.env.GITHUB_TOKEN || "";
   if (envToken) return envToken;
-  const cfg = configManager.get() as Record<string, unknown>;
-  const cfgToken = (cfg.githubToken as string) || "";
-  return cfgToken;
+  const cfg = configManager.get() as unknown as { githubToken?: string };
+  return cfg.githubToken || "";
 }
 
-/** 通知用户「有新版本，且已下载完成」 */
+/** 通知用户「有新版本，已下载完成」 */
 function notifyDownloaded(info: { version: string }): void {
   const win = panelResolver();
   const opts = {
@@ -47,7 +46,7 @@ function notifyDownloaded(info: { version: string }): void {
   }
 }
 
-/** 设置获取聊天面板窗口的闭包（用于把更新弹窗绑定到主窗口） */
+/** 设置获取主窗口的闭包（用于把更新弹窗绑定到主窗口） */
 export function setUpdaterPanelResolver(fn: () => BrowserWindow | null): void {
   panelResolver = fn;
 }
@@ -62,18 +61,16 @@ export function initAutoUpdater(): void {
 
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
-  autoUpdater.logger = logger as unknown as typeof autoUpdater["logger"];
+  autoUpdater.logger = logger as unknown as (typeof autoUpdater)["logger"];
 
   const token = resolveToken();
-  if (token) {
-    autoUpdater.setFeedURL({
-      provider: "github",
-      owner: "1535273240sch-droid",
-      repo: "Jarvis-Desktop-Assistant",
-      private: true,
-      token,
-    } as never);
-  }
+  autoUpdater.setFeedURL({
+    provider: "github",
+    owner: "1535273240sch-droid",
+    repo: "Jarvis-Desktop-Assistant",
+    private: token.length > 0,
+    token: token.length > 0 ? token : undefined,
+  } as unknown as Parameters<typeof autoUpdater.setFeedURL>[0]);
 
   autoUpdater.on("checking-for-update", () => logger.info("[Updater] 正在检查更新..."));
   autoUpdater.on("update-available", (info) => {
@@ -83,7 +80,6 @@ export function initAutoUpdater(): void {
     logger.info(`[Updater] 当前已是最新版本 v${info.version}`);
   });
   autoUpdater.on("error", (err) => {
-    // 私有仓库无 token 时这里会报 404/401，仅记录，不打扰用户
     logger.warn(`[Updater] 更新检查失败: ${(err as Error).message}`);
   });
   autoUpdater.on("download-progress", (p) => {

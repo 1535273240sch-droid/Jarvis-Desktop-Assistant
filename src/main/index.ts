@@ -16,6 +16,7 @@ import { desktopController } from "./desktop-control";
 import { armEmergencyStop, disposeEmergencyStop } from "./emergency-stop";
 import { isAuthorized, ensureAutoAuthorized } from "./authorization";
 import { registerIpcHandlers } from "./ipc";
+import { autoUpdater } from "electron-updater";
 import { initAutoUpdater, setUpdaterPanelResolver } from "./updater";
 import { ASSISTANT_STATES, IPC } from "../common/types";
 import type { AssistantState } from "../common/types";
@@ -214,13 +215,7 @@ function createTray(): void {
       {
         label: "检查更新",
         click: async () => {
-          const { autoUpdater } = require("electron-updater");
           try {
-            dialog.showMessageBox({
-              type: "info",
-              title: "检查更新",
-              message: "正在检查最新版本...",
-            });
             const r = await autoUpdater.checkForUpdates();
             if (!r) {
               dialog.showMessageBox({
