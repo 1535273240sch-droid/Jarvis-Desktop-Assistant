@@ -1,0 +1,54 @@
+name: Build Windows Installer
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build application (TypeScript + assets)
+        run: npm run build
+
+      - name: Package Windows installer (NSIS)
+        run: npm run dist
+
+      - name: Upload installer as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Jarvis-Setup-v1.0.0
+          path: release/*.exe
+          if-no-files-found: error
+
+      - name: Publish GitHub Release (v1.0.0)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.0
+          name: "Jarvis v1.0.0"
+          body: |
+            ## Jarvis v1.0.0
+
+            Windows 11 桌面 AI 助手（WebGPU 悬浮球 + 实时语音 + 工具执行 + 屏幕视觉）。
+
+            自动构建的安装包，点击下载 `Jarvis-Setup-1.0.0-x64.exe`。
+          files: release/*.exe
+          draft: false
+          prerelease: false
+          update_release: true
