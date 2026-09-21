@@ -36,7 +36,7 @@ jobs:
         run: npm run build
 
       - name: Package Windows installer (NSIS)
-        run: npm run dist
+        run: npm run dist -- --publish never
 
       - name: Upload installer as artifact
         uses: actions/upload-artifact@v4
