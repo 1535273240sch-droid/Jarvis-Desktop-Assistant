@@ -21,8 +21,16 @@ jobs:
           node-version: 22
           cache: npm
 
-      - name: Install dependencies
+      - name: Enable pnpm (for vendor/orb)
+        run: corepack enable && corepack prepare pnpm@11.19.0 --activate
+
+      - name: Install main dependencies
         run: npm ci
+
+      - name: Install vendor/orb dependencies (pnpm)
+        run: |
+          cd vendor/orb
+          pnpm install --no-frozen-lockfile
 
       - name: Build application (TypeScript + assets)
         run: npm run build
