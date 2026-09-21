@@ -1,0 +1,1169 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Jarvis</title>
+<style>
+  /* ============================================================
+     Jarvis 晶莹悬浮银玻（Luminescent Crystal Glass）
+     设计核心：
+      1. 消除沉闷死黑，注入通透的深银钛底与多道银白漫反射高光流线
+      2. 实体厚玻璃倒角：受光面 1px 亮银白晶体折射边框 + 内层高光线
+      3. 表面斜向漫反射光带（Glass Sheen），营造物理玻璃的晶莹光泽
+      4. 空态玻璃欢迎卡：悬浮毛玻璃托盘，增强空间层级感
+      5. 极简白银金属按键与嵌壁式微透输入槽，细节精致高级
+     ============================================================ */
+
+  :root {
+    /* 白银至冷银光阶 */
+    --silver-sheen: rgba(255, 255, 255, 0.95);
+    --silver-1: #ffffff;
+    --silver-2: #f8fafc;
+    --silver-3: #f1f5f9;
+    --silver-4: #e2e8f0;
+    --silver-5: #cbd5e1;
+    --silver-6: #94a3b8;
+
+    /* 通透深银钛基调（摒弃死黑，具有银金属暗光） */
+    --titan-surface: #1e222b;
+    --titan-deep: #151820;
+    --titan-base: #101217;
+
+    /* 文本阶梯（加深加实对比度，告别发虚发淡） */
+    --text-pure: #ffffff;
+    --text-primary: #ffffff;
+    --text-secondary: #e2e8f0;
+    --text-muted: #a0aec0;
+
+    /* 功能指示（点缀色） */
+    --dot-green: #34d399;
+    --dot-amber: #fbbf24;
+    --dot-crimson: #f87171;
+
+    /* 极致水晶玻璃通透层 */
+    --glass-plate: rgba(255, 255, 255, 0.08);
+    --glass-plate-hover: rgba(255, 255, 255, 0.14);
+    --glass-subtle: rgba(255, 255, 255, 0.045);
+    --glass-sunken: rgba(0, 0, 0, 0.35);
+
+    /* 晶体折射描边 */
+    --border-crystal: rgba(255, 255, 255, 0.32);
+    --border-rim: rgba(255, 255, 255, 0.18);
+    --border-faint: rgba(255, 255, 255, 0.08);
+
+    /* 物理玻璃内折射高光 */
+    --sheen-top: inset 0 1px 1px 0 rgba(255, 255, 255, 0.65);
+    --sheen-bottom: inset 0 -1px 1px 0 rgba(255, 255, 255, 0.15);
+    --shadow-float: 0 20px 50px rgba(0, 0, 0, 0.45);
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+
+  body {
+    color: var(--text-primary);
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", system-ui, sans-serif;
+    font-size: 14px;
+    display: flex; flex-direction: column; overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+    position: relative;
+    background: var(--titan-base);
+    box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.25), inset 0 1px 3px rgba(255, 255, 255, 0.65), inset 0 -1px 2px rgba(0, 0, 0, 0.4);
+  }
+
+  /* ---------------- 一整块高透精雕玻璃底景 ---------------- */
+  body::before {
+    content: ""; position: fixed; inset: 0; z-index: -2;
+    background:
+      /* 顶部透光穹顶（白银聚光漫射，产生通透玻璃感） */
+      radial-gradient(100% 380px at 50% 0%, rgba(255, 255, 255, 0.35) 0%, rgba(220, 235, 255, 0.14) 42%, transparent 78%),
+      /* 中间核心漫射背光（彻底消除死黑，呈现通透水晶内折射） */
+      radial-gradient(ellipse 700px 520px at 50% 42%, rgba(255, 255, 255, 0.18) 0%, rgba(210, 225, 245, 0.06) 50%, transparent 75%),
+      /* 左上方斜向漫射玻璃高光锥 */
+      radial-gradient(900px 600px at 12% 12%, rgba(255, 255, 255, 0.22) 0%, rgba(200, 215, 235, 0.08) 45%, transparent 68%),
+      /* 底部操作区通透银白折射光 */
+      radial-gradient(800px 450px at 50% 92%, rgba(255, 255, 255, 0.18) 0%, rgba(190, 205, 225, 0.06) 50%, transparent 70%),
+      /* 物理玻璃斜切漫反射光带（Specular Glass Reflection） */
+      linear-gradient(125deg, rgba(255,255,255,0.22) 0%, rgba(255,255,255,0.04) 26%, rgba(255,255,255,0.14) 48%, rgba(255,255,255,0.02) 72%, rgba(255,255,255,0.10) 100%),
+      /* 通透温润的深银钛底色（富有银金属与晶体厚度感，拒绝沉闷死黑） */
+      linear-gradient(165deg, #303746 0%, #252b37 36%, #1c212c 70%, #151822 100%);
+  }
+
+  /* 细腻微晶喷砂噪点 + 表面流动微光膜 */
+  body::after {
+    content: ""; position: fixed; inset: 0; z-index: -1; pointer-events: none;
+    opacity: .042; mix-blend-mode: overlay;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cfilter id='g'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='120' height='120' filter='url(%23g)'/%3E%3C/svg%3E");
+  }
+
+  /* ---------------- 顶栏：悬浮银镜晶体 ---------------- */
+
+  header {
+    display: flex; align-items: center; gap: 11px;
+    padding: 15px 19px;
+    flex-shrink: 0; position: relative;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.14) 0%, rgba(255, 255, 255, 0.03) 100%);
+    backdrop-filter: blur(32px) saturate(150%);
+    -webkit-backdrop-filter: blur(32px) saturate(150%);
+    border-bottom: 1px solid var(--border-rim);
+    box-shadow: var(--sheen-top), 0 10px 30px rgba(0, 0, 0, 0.28);
+  }
+
+  /* 纯银五段式镜面反射文字 */
+  header .title {
+    font-weight: 800; font-size: 16.5px; letter-spacing: .09em;
+    background: linear-gradient(176deg, #ffffff 0%, #f1f5f9 28%, #94a3b8 56%, #ffffff 80%, #cbd5e1 100%);
+    -webkit-background-clip: text; background-clip: text;
+    -webkit-text-fill-color: transparent;
+    filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.5));
+  }
+  header .spacer { flex: 1; }
+
+  /* 晶体胶囊徽章 */
+  .badge {
+    font-size: 11px; padding: 4px 13px; border-radius: 999px;
+    color: var(--silver-3); white-space: nowrap;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.16) 0%, rgba(255, 255, 255, 0.04) 100%);
+    border: 1px solid var(--border-crystal);
+    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.5), 0 2px 10px rgba(0, 0, 0, 0.25);
+    transition: all .2s;
+  }
+  .badge.on {
+    color: #022013; font-weight: 700; border-color: rgba(255, 255, 255, 0.6);
+    background: linear-gradient(180deg, #dcfce7 0%, #4ade80 60%, #16a34a 100%);
+    box-shadow: 0 0 18px rgba(74, 222, 128, 0.55), inset 0 1px 1px #ffffff;
+  }
+  .badge.warn {
+    color: #2b1700; font-weight: 700; border-color: rgba(255, 255, 255, 0.6);
+    background: linear-gradient(180deg, #fef9c3 0%, #fbbf24 60%, #d97706 100%);
+    box-shadow: 0 0 18px rgba(251, 191, 36, 0.5), inset 0 1px 1px #ffffff;
+  }
+  .badge.err {
+    color: #ffffff; font-weight: 700; border-color: rgba(255, 255, 255, 0.6);
+    background: linear-gradient(180deg, #fee2e2 0%, #f87171 60%, #dc2626 100%);
+    box-shadow: 0 0 18px rgba(248, 113, 113, 0.55), inset 0 1px 1px #ffffff;
+  }
+
+  /* ---------------- 状态条：嵌壁式磨砂玻璃 ---------------- */
+
+  #stateBar {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 19px; flex-shrink: 0;
+    font-size: 12px; color: var(--text-secondary);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.015) 100%);
+    backdrop-filter: blur(24px);
+    -webkit-backdrop-filter: blur(24px);
+    border-bottom: 1px solid var(--border-faint);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.15);
+  }
+  #stateDot {
+    width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+    background: var(--silver-4); transition: all .28s;
+  }
+  .st-idle #stateDot      { background: var(--silver-2); box-shadow: 0 0 10px rgba(255, 255, 255, 0.6); }
+  .st-listening #stateDot { background: #ffffff; box-shadow: 0 0 16px #ffffff, 0 0 5px #e2e8f0; }
+  .st-thinking #stateDot  { background: #ffffff; box-shadow: 0 0 16px #ffffff, 0 0 6px #cbd5e1; animation: pulse 1.4s infinite; }
+  .st-executing #stateDot { background: #fbbf24; box-shadow: 0 0 16px #fbbf24, 0 0 5px #fff; animation: pulse 1.1s infinite; }
+  .st-speaking #stateDot  { background: #34d399; box-shadow: 0 0 18px #34d399, 0 0 6px #fff; animation: pulse .85s infinite; }
+  .st-error #stateDot     { background: #f87171; box-shadow: 0 0 16px #f87171; animation: pulse .65s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; transform: scale(1); } 50% { opacity: .4; transform: scale(0.92); } }
+
+  #stateText { color: var(--text-pure); font-weight: 600; letter-spacing: .02em; }
+  #sessionInfo { font-variant-numeric: tabular-nums; color: var(--text-muted); }
+
+  /* ---------------- 消息区：层叠晶体气泡 ---------------- */
+
+  #chat {
+    flex: 1; overflow-y: auto; padding: 20px 18px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  #chat::-webkit-scrollbar { width: 7px; }
+  #chat::-webkit-scrollbar-track { background: transparent; }
+  #chat::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.30), rgba(255, 255, 255, 0.10));
+    border-radius: 4px; border: 2px solid transparent; background-clip: padding-box;
+  }
+  #chat::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.45); background-clip: padding-box; }
+
+  .msg {
+    max-width: 88%; padding: 12px 17px; border-radius: 15px;
+    line-height: 1.68; word-break: break-word; white-space: pre-wrap;
+    animation: rise .28s cubic-bezier(.2,.8,.3,1);
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+
+  /* 悬浮欢迎玻璃卡（消除无消息时的空荡死寂） */
+  .welcome-card {
+    align-self: center; margin: 14px auto; max-width: 92%;
+    padding: 18px 22px; border-radius: 18px;
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0.05) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.42);
+    box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.8), 0 20px 45px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(32px); -webkit-backdrop-filter: blur(32px);
+    text-align: center; color: var(--text-secondary); line-height: 1.75; font-size: 13px;
+  }
+  .welcome-card strong {
+    color: var(--text-pure); font-weight: 800; display: block; margin-bottom: 6px; font-size: 14.5px; letter-spacing: .03em;
+    background: linear-gradient(180deg, #ffffff 0%, #e2e8f0 60%, #cbd5e1 100%);
+    -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+  }
+
+  /* 用户气泡：冰晶透光玻璃 */
+  .msg.user {
+    align-self: flex-end; border-bottom-right-radius: 4px;
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.26) 0%, rgba(255, 255, 255, 0.09) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.42);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.28), inset 0 1px 1px rgba(255, 255, 255, 0.75);
+    backdrop-filter: blur(28px); -webkit-backdrop-filter: blur(28px);
+    color: var(--text-pure);
+  }
+
+  /* 助手气泡：高级灰银磨砂晶体 */
+  .msg.assistant {
+    align-self: flex-start; border-bottom-left-radius: 4px;
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.13) 0%, rgba(255, 255, 255, 0.04) 100%);
+    border: 1px solid var(--border-crystal);
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.30), inset 0 1px 1px rgba(255, 255, 255, 0.45);
+    backdrop-filter: blur(28px); -webkit-backdrop-filter: blur(28px);
+    color: var(--text-primary);
+  }
+
+  .msg.system {
+    align-self: center; max-width: 96%; text-align: center;
+    color: var(--text-muted); font-size: 12.5px; background: transparent;
+  }
+
+  /* 思考状态：银白流动微光 */
+  .msg.thinking {
+    align-self: flex-start; font-size: 12.5px; font-style: italic; color: #f1f5f9;
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.18) 0%, rgba(255, 255, 255, 0.05) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.35);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+    backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+  }
+
+  /* 工具执行卡片：精制悬浮磨砂玻璃盘 */
+  .tool {
+    align-self: flex-start; max-width: 92%; font-size: 12.5px;
+    padding: 13px 16px; border-radius: 14px;
+    background: linear-gradient(145deg, rgba(255, 255, 255, 0.11) 0%, rgba(255, 255, 255, 0.03) 100%);
+    border: 1px solid var(--border-crystal);
+    box-shadow: 0 8px 25px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.35);
+    backdrop-filter: blur(24px); -webkit-backdrop-filter: blur(24px);
+  }
+  .tool .tool-head { font-weight: 600; margin-bottom: 6px; display: flex; align-items: center; gap: 8px; color: var(--silver-2); }
+  .tool .tool-args {
+    color: var(--text-muted); font-family: Consolas, ui-monospace, monospace;
+    font-size: 11.5px; white-space: pre-wrap; word-break: break-all; max-height: 130px; overflow: auto;
+  }
+  .tool .tool-res {
+    margin-top: 7px; padding-top: 7px; color: #d1fae5;
+    border-top: 1px dashed rgba(255, 255, 255, 0.20); white-space: pre-wrap;
+  }
+  .tool.failed {
+    background: linear-gradient(145deg, rgba(248, 113, 113, 0.16), rgba(248, 113, 113, 0.04));
+    border-color: rgba(248, 113, 113, 0.45);
+  }
+  .tool.rejected {
+    background: linear-gradient(145deg, rgba(251, 191, 36, 0.16), rgba(251, 191, 36, 0.04));
+    border-color: rgba(251, 191, 36, 0.45);
+  }
+
+  .shot {
+    align-self: flex-start; max-width: 100%; border-radius: 14px;
+    border: 1px solid var(--border-crystal);
+    box-shadow: 0 14px 40px rgba(0, 0, 0, 0.45);
+  }
+
+  /* ---------------- 底栏：透光玻璃底座 ---------------- */
+
+  footer {
+    flex-shrink: 0; padding: 14px 16px 16px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.16) 100%);
+    backdrop-filter: blur(36px) saturate(160%);
+    -webkit-backdrop-filter: blur(36px) saturate(160%);
+    border-top: 1px solid rgba(255, 255, 255, 0.28);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.65), 0 -12px 35px rgba(0, 0, 0, 0.3);
+  }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row + .row { margin-top: 10px; }
+
+  /* 嵌壁式通透磨砂槽（输入框） */
+  input, select, textarea {
+    width: 100%; font-size: 13px; font-family: inherit; color: var(--text-pure); outline: none;
+    padding: 11px 15px; border-radius: 11px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.07) 0%, rgba(0, 0, 0, 0.22) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.26);
+    box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.35), inset 0 -1px 0 rgba(255, 255, 255, 0.16);
+    transition: all .2s;
+  }
+  input:focus, textarea:focus, select:focus {
+    border-color: rgba(255, 255, 255, 0.85);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.12) 0%, rgba(0, 0, 0, 0.18) 100%);
+    box-shadow: inset 0 2px 5px rgba(0, 0, 0, 0.35), 0 0 0 3px rgba(255, 255, 255, 0.25);
+  }
+  input::placeholder, textarea::placeholder { color: #94a3b8; }
+  textarea { resize: none; }
+
+  /* ---------------- 晶莹实体玻璃/金属按键 ---------------- */
+
+  button {
+    font-size: 13px; font-family: inherit; color: var(--text-pure); white-space: nowrap; cursor: pointer;
+    padding: 11px 17px; border-radius: 11px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.20) 0%, rgba(255, 255, 255, 0.06) 100%);
+    border: 1px solid var(--border-crystal);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.26), inset 0 1px 0 rgba(255, 255, 255, 0.55);
+    transition: all .18s;
+  }
+  button:hover:not(:disabled) {
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.32) 0%, rgba(255, 255, 255, 0.12) 100%);
+    border-color: rgba(255, 255, 255, 0.7);
+    box-shadow: 0 6px 22px rgba(0, 0, 0, 0.32), inset 0 1px 0 rgba(255, 255, 255, 0.85);
+    transform: translateY(-1px);
+  }
+  button:active:not(:disabled) {
+    transform: translateY(0);
+    box-shadow: inset 0 2px 7px rgba(0, 0, 0, 0.45);
+  }
+
+  /* 主按键：镜面纯银高光金属板（白银液态反光，告别单调） */
+  button.primary {
+    color: #0d1219; font-weight: 800; border-color: rgba(255, 255, 255, 0.95);
+    background: linear-gradient(180deg, #ffffff 0%, #f8fafc 30%, #e2e8f0 55%, #cbd5e1 100%);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35), inset 0 1px 2px #ffffff, inset 0 -1px 2px rgba(100, 116, 139, 0.35);
+  }
+  button.primary:hover:not(:disabled) {
+    background: linear-gradient(180deg, #ffffff 0%, #ffffff 45%, #f1f5f9 65%, #e2e8f0 100%);
+    box-shadow: 0 8px 26px rgba(255, 255, 255, 0.32), inset 0 1px 3px #ffffff;
+  }
+
+  /* 危险按键：晶莹红宝石玻璃 */
+  button.danger {
+    color: #fff; border-color: rgba(255, 255, 255, 0.45);
+    background: linear-gradient(180deg, #f87171 0%, #dc2626 62%, #b91c1c 100%);
+    box-shadow: 0 4px 18px rgba(220, 38, 38, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.65);
+  }
+  button.danger:hover:not(:disabled) {
+    background: linear-gradient(180deg, #fca5a5 0%, #ef4444 60%, #dc2626 100%);
+    box-shadow: 0 6px 24px rgba(220, 38, 38, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.85);
+  }
+  button:disabled { opacity: .42; cursor: not-allowed; }
+
+  /* ---------------- 确认弹窗：悬浮厚玻璃板 ---------------- */
+
+  dialog {
+    padding: 0; width: min(440px, 92vw); color: var(--text-pure); border-radius: 18px;
+    background: linear-gradient(160deg, rgba(32, 37, 48, 0.94) 0%, rgba(18, 21, 28, 0.98) 100%);
+    border: 1px solid var(--border-crystal);
+    box-shadow: var(--shadow-float), inset 0 1px 1px rgba(255, 255, 255, 0.6);
+    backdrop-filter: blur(36px); -webkit-backdrop-filter: blur(36px);
+  }
+  dialog::backdrop { background: rgba(5, 7, 10, 0.68); backdrop-filter: blur(6px); }
+  dialog .dlg-head {
+    padding: 17px 22px; font-weight: 700; letter-spacing: .02em;
+    border-bottom: 1px solid var(--border-rim);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.25);
+    color: var(--silver-1);
+  }
+  dialog .dlg-body { padding: 18px 22px; font-size: 13px; line-height: 1.7; color: var(--text-secondary); }
+  dialog .dlg-body pre {
+    margin-top: 11px; padding: 13px; border-radius: 10px; max-height: 190px; overflow: auto;
+    font-size: 11.5px; white-space: pre-wrap; word-break: break-all; color: #f8fafc;
+    background: rgba(0, 0, 0, 0.45); border: 1px solid var(--border-rim);
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.45);
+  }
+  dialog .dlg-foot {
+    padding: 15px 22px; border-top: 1px solid var(--border-rim);
+    display: flex; gap: 10px; justify-content: flex-end;
+  }
+
+  /* ---------------- 浮动通知：高透玻璃水晶 ---------------- */
+
+  #toast {
+    position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%) translateY(10px);
+    padding: 12px 22px; border-radius: 14px; font-size: 12.5px; z-index: 99;
+    opacity: 0; pointer-events: none; transition: all .26s cubic-bezier(.2,.8,.3,1);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.28) 0%, rgba(255, 255, 255, 0.12) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.55);
+    box-shadow: 0 18px 45px rgba(0, 0, 0, 0.5), inset 0 1px 1px rgba(255, 255, 255, 0.85);
+    backdrop-filter: blur(30px); -webkit-backdrop-filter: blur(30px);
+    color: var(--text-pure); font-weight: 600;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ---------------- 设置区：深钛折叠面板 ---------------- */
+
+  details.settings {
+    margin-top: 12px; padding: 0 15px; border-radius: 12px;
+    background: linear-gradient(180deg, rgba(0, 0, 0, 0.28) 0%, rgba(0, 0, 0, 0.14) 100%);
+    border: 1px solid var(--border-rim);
+    box-shadow: inset 0 2px 6px rgba(0, 0, 0, 0.28);
+  }
+  details.settings summary {
+    padding: 13px 2px; cursor: pointer; user-select: none;
+    font-size: 12.5px; color: var(--silver-3); letter-spacing: .02em;
+    transition: color .18s;
+  }
+  details.settings summary:hover { color: #ffffff; }
+  details.settings .body { padding-bottom: 16px; display: flex; flex-direction: column; gap: 13px; }
+
+  .field { display: flex; flex-direction: column; gap: 6px; }
+  .field label { font-size: 11.5px; color: var(--silver-3); letter-spacing: .01em; }
+  .hint { font-size: 11px; color: var(--text-muted); line-height: 1.6; }
+  .hint code {
+    padding: 2px 7px; border-radius: 5px; font-size: 10.5px; color: #ffffff;
+    background: rgba(255, 255, 255, 0.16); border: 1px solid rgba(255, 255, 255, 0.28);
+  }
+  .kv {
+    display: flex; justify-content: space-between; gap: 10px;
+    font-size: 11.5px; color: var(--text-muted);
+  }
+  .kv span:last-child {
+    color: var(--silver-2); font-family: Consolas, ui-monospace, monospace;
+    text-align: right; max-width: 62%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+</style>
+</head>
+<body>
+  <header>
+    <span class="title">JARVIS</span>
+    <span id="badgeConn" class="badge">未连接</span>
+    <span class="spacer"></span>
+    <span id="badgeModel" class="badge" title="当前实时模型">待配置</span>
+  </header>
+
+  <div id="stateBar">
+    <span id="stateDot"></span>
+    <span id="stateText">空闲</span>
+    <span class="spacer" style="flex:1"></span>
+    <span id="sessionInfo">会话未开始</span>
+  </div>
+
+  <div id="chat">
+    <div class="welcome-card">
+      <strong>Jarvis 智能桌面助手</strong>
+      点击「启动语音会话」直接对话，或在下方输入文字。<br/>
+      如需设置密钥或切换模型，展开下方「设置与状态」。
+    </div>
+  </div>
+
+  <footer>
+    <div class="row">
+      <button id="btnStart" class="primary">启动语音会话</button>
+      <button id="btnStop">停止</button>
+      <button id="btnInterrupt" class="danger">打断</button>
+      <button id="btnScreen" title="截取当前窗口并让 AI 分析">看屏幕</button>
+    </div>
+    <div class="row">
+      <textarea id="input" rows="1" placeholder="输入消息，回车发送（Shift+回车换行）"></textarea>
+      <button id="btnSend" class="primary">发送</button>
+    </div>
+
+    <details class="settings">
+      <summary>设置与状态</summary>
+      <div class="body">
+        <div class="field">
+          <label>StepFun API Key（保存在本机配置文件，不写日志、不进安装包）</label>
+          <div class="row">
+            <input id="apiKey" type="password" placeholder="在这里粘贴你的 API Key" autocomplete="off" />
+            <button id="btnSaveKey">保存</button>
+          </div>
+          <div class="hint" id="keyHint">读取中...</div>
+        </div>
+
+        <div class="field">
+          <label>助手语音音色调节</label>
+          <div class="row">
+            <select id="voiceSelect">
+              <option value="cixingnansheng">磁性男声 (推荐默认)</option>
+              <option value="zhengpaiqingnian">正派青年</option>
+              <option value="wenrounvsheng">温柔女声</option>
+              <option value="tianmeinvsheng">甜美女声</option>
+              <option value="qingnianyin">清爽青年</option>
+              <option value="custom">自定义音色代码...</option>
+            </select>
+            <input id="customVoiceInput" placeholder="输入自定义音色ID" style="display:none; max-width: 140px;" />
+            <button id="btnSaveVoice">应用</button>
+          </div>
+          <div class="hint">可随时切换模型支持的音色，保存后对后续回复生效。</div>
+        </div>
+
+        <div class="field">
+          <label>实时语音模型 ID</label>
+          <div class="row">
+            <input id="model" placeholder="stepaudio-3-realtime-preview" />
+            <button id="btnSaveModel">应用</button>
+          </div>
+          <div class="hint">预览版模型可能下线；如不可用，请改为 <code>stepaudio-2.5-realtime</code> 或 <code>step-1o-audio</code>。</div>
+        </div>
+
+        <div class="field">
+          <label>实时语音接口地址</label>
+          <div class="row">
+            <input id="rtUrl" placeholder="wss://api.stepfun.com/v1/realtime" />
+            <button id="btnSaveRtUrl">应用</button>
+          </div>
+          <div class="hint">接口与模型必须匹配：若用 <code>step_plan</code> 通道，模型要选该通道内的型号，否则会返回 404。</div>
+        </div>
+
+        <div class="field">
+          <label>屏幕理解模型 ID（支持自定义模型）</label>
+          <div class="row">
+            <input id="visionModel" placeholder="step-5-preview / gpt-4o / claude-3-5-sonnet" />
+            <button id="btnSaveVision">应用</button>
+          </div>
+          <div class="hint">支持 StepFun 多模态模型，亦可自定义为任意兼容 OpenAI 规范的视觉多模态模型。</div>
+        </div>
+
+        <div class="field">
+          <label>屏幕理解接口地址（支持自定义端点）</label>
+          <div class="row">
+            <input id="visionBaseUrl" placeholder="https://api.stepfun.com/step_plan/v1/chat/completions" />
+            <button id="btnSaveVisionUrl">应用</button>
+          </div>
+          <div class="hint">可接入第三方多模态接口或本地视觉服务（如 Ollama / vLLM / 商业 API）。</div>
+        </div>
+
+        <div class="field">
+          <label>屏幕理解专属 API Key（可选）</label>
+          <div class="row">
+            <input id="visionApiKey" type="password" placeholder="留空则默认沿用上方主 API Key" autocomplete="off" />
+            <button id="btnSaveVisionKey">保存</button>
+          </div>
+          <div class="hint" id="visionKeyHint">未单独配置，默认沿用主 Key</div>
+        </div>
+
+        <div class="field">
+          <label>工具执行允许访问的目录</label>
+          <textarea id="allowedDirs" rows="3" placeholder="每行一个绝对路径"></textarea>
+          <div class="row">
+            <button id="btnSaveDirs">保存并重启工具</button>
+          </div>
+          <div class="hint">出于安全，留空将不会启动工具执行（空数组等于放开整个文件系统）。目录白名单不约束终端命令，高危操作仍会弹窗确认。</div>
+        </div>
+
+        <div class="kv"><span>工具执行状态</span><span id="mcpStatus">读取中...</span></div>
+        <div class="kv"><span>WebGPU 状态</span><span id="gpuStatus">未检测</span></div>
+        <div class="kv"><span>配置文件位置</span><span id="cfgPath">读取中...</span></div>
+        <div class="row">
+          <button id="btnGpu">重跑 WebGPU 自检</button>
+        </div>
+      </div>
+    </details>
+  </footer>
+
+  <dialog id="confirmDlg">
+    <div class="dlg-head" id="cfmTitle">需要你确认</div>
+    <div class="dlg-body">
+      <div id="cfmDesc"></div>
+      <pre id="cfmTarget"></pre>
+    </div>
+    <div class="dlg-foot">
+      <button id="cfmReject">拒绝</button>
+      <button id="cfmApprove" class="primary">允许执行</button>
+    </div>
+  </dialog>
+
+  <div id="toast"></div>
+
+<script>
+/* =====================================================================
+ * Jarvis 聊天面板（渲染进程）
+ *
+ * 分工：
+ *  - 本进程负责 Web Audio：麦克风采集、重采样 24kHz PCM16、分块上行；
+ *    下行 PCM16 的流式播放与立即清空（打断的本地第一步）。
+ *  - 本进程负责四频段频谱计算（球体不做这件事，必须由宿主算好喂给它）。
+ *  - 本进程不接触 API Key、不直接联网，全部经 preload 转主进程。
+ * ===================================================================== */
+
+const api = window.jarvis;
+const $ = (id) => document.getElementById(id);
+
+const chat = $('chat');
+const toast = (msg) => {
+  const t = $('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => t.classList.remove('show'), 2600);
+};
+
+const STATE_LABEL = {
+  idle: '空闲', listening: '聆听中', thinking: '思考中',
+  executing: '执行中', speaking: '播报中', error: '错误',
+};
+
+/* ---------------- 聊天渲染 ---------------- */
+
+let currentAssistantEl = null;
+let currentThinkingEl = null;
+const toolEls = new Map();
+
+function addMsg(cls, text) {
+  const d = document.createElement('div');
+  d.className = 'msg ' + cls;
+  d.textContent = text;
+  chat.appendChild(d);
+  chat.scrollTop = chat.scrollHeight;
+  return d;
+}
+
+function onMessage(payload) {
+  if (!payload) return;
+
+  if (payload.systemNotice) { addMsg('system', payload.systemNotice); return; }
+
+  if (payload.userText) {
+    addMsg('user', payload.userText);
+    currentAssistantEl = null;
+    currentThinkingEl = null;
+    return;
+  }
+
+  if (payload.thinkingDelta !== undefined) {
+    if (!currentThinkingEl) {
+      currentThinkingEl = document.createElement('div');
+      currentThinkingEl.className = 'msg thinking';
+      currentThinkingEl.textContent = '思考中: ';
+      chat.appendChild(currentThinkingEl);
+    }
+    currentThinkingEl.textContent += payload.thinkingDelta || '';
+    chat.scrollTop = chat.scrollHeight;
+    return;
+  }
+
+  if (payload.assistantDelta !== undefined) {
+    if (!currentAssistantEl) {
+      currentAssistantEl = document.createElement('div');
+      currentAssistantEl.className = 'msg assistant';
+      chat.appendChild(currentAssistantEl);
+    }
+    currentAssistantEl.textContent += payload.assistantDelta || '';
+    chat.scrollTop = chat.scrollHeight;
+    return;
+  }
+
+  if (payload.toolCall) { renderTool(payload.toolCall); return; }
+
+  if (payload.screenshot) {
+    const img = document.createElement('img');
+    img.className = 'shot';
+    img.src = payload.screenshot;
+    chat.appendChild(img);
+    chat.scrollTop = chat.scrollHeight;
+    return;
+  }
+
+  if (payload.reset) {
+    currentAssistantEl = null;
+    currentThinkingEl = null;
+  }
+}
+
+function renderTool(tc) {
+  let el = toolEls.get(tc.callId);
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'tool';
+    chat.appendChild(el);
+    toolEls.set(tc.callId, el);
+  }
+  const statusText = { pending: '等待中', executing: '执行中', success: '已完成', failed: '失败', rejected: '已拒绝' }[tc.status] || tc.status;
+  const cls = tc.status === 'failed' ? 'failed' : tc.status === 'rejected' ? 'rejected' : '';
+  el.className = 'tool ' + cls;
+  el.innerHTML = '';
+
+  const head = document.createElement('div');
+  head.className = 'tool-head';
+  head.textContent = '工具 ' + tc.toolName + ' | ' + statusText + (tc.durationMs ? ' | ' + tc.durationMs + 'ms' : '');
+  el.appendChild(head);
+
+  const args = document.createElement('div');
+  args.className = 'tool-args';
+  args.textContent = JSON.stringify(tc.args).slice(0, 400);
+  el.appendChild(args);
+
+  if (tc.result) {
+    const res = document.createElement('div');
+    res.className = 'tool-res';
+    res.textContent = tc.result.slice(0, 1200);
+    el.appendChild(res);
+  }
+  chat.scrollTop = chat.scrollHeight;
+}
+
+/* ---------------- 状态与连接 ---------------- */
+
+function setState(st) {
+  $('stateBar').className = 'st-' + st;
+  $('stateText').textContent = STATE_LABEL[st] || st;
+}
+
+function setConn(conn, detail) {
+  const b = $('badgeConn');
+  const map = {
+    connected: ['已连接', 'on'], connecting: ['连接中', 'warn'],
+    reconnecting: ['重连中', 'warn'], disconnected: ['未连接', ''], error: ['错误', 'err'],
+  };
+  const pair = map[conn] || ['未知', ''];
+  b.textContent = pair[0];
+  b.className = 'badge ' + pair[1];
+  b.title = detail || '';
+}
+
+function fmt(sec) {
+  if (!Number.isFinite(sec)) return '未知';
+  const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+  return m + '分' + String(s).padStart(2, '0') + '秒';
+}
+
+api.onSessionStatus((st) => {
+  setConn(st.connection, st.detail);
+  $('badgeModel').textContent = st.model || '待配置';
+  $('sessionInfo').textContent = st.connection === 'connected'
+    ? '会话剩余 ' + fmt(st.remainingSeconds) + '，约 ' + fmt(st.rebuildInSeconds) + ' 后自动续约'
+    : '会话未开始';
+});
+
+api.onStateChanged((p) => setState(p.state));
+api.onMessage(onMessage);
+
+/* ---------------- 音频：采集（上行） ---------------- */
+
+let captureCtx = null, mediaStream = null, sourceNode = null, processor = null, analyser = null;
+let freqData = null;
+let sampleAccum = [];
+let bandsTimer = null;
+let smooth = { low: 0, mid: 0, high: 0, all: 0 };
+let lastBandsTs = 0;
+const TARGET_RATE = 24000;
+const CHUNK_MS = 100;
+const TARGET_SAMPLES = TARGET_RATE * CHUNK_MS / 1000;
+
+function floatToPcm16Base64(samples) {
+  const buf = new ArrayBuffer(samples.length * 2);
+  const view = new DataView(buf);
+  for (let i = 0; i < samples.length; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  const bytes = new Uint8Array(buf);
+  let bin = '';
+  const CH = 0x8000;
+  for (let i = 0; i < bytes.length; i += CH) {
+    bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+  }
+  return btoa(bin);
+}
+
+function resample(input, inRate, outRate) {
+  if (inRate === outRate) return input;
+  const ratio = inRate / outRate;
+  const len = Math.floor(input.length / ratio);
+  const out = new Float32Array(len);
+  for (let i = 0; i < len; i++) {
+    const pos = i * ratio;
+    const i0 = Math.floor(pos), i1 = Math.min(input.length - 1, i0 + 1);
+    const t = pos - i0;
+    out[i] = input[i0] * (1 - t) + input[i1] * t;
+  }
+  return out;
+}
+
+async function startCapture() {
+  if (captureCtx) return;
+  mediaStream = await navigator.mediaDevices.getUserMedia({
+    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    video: false,
+  });
+  captureCtx = new (window.AudioContext || window.webkitAudioContext)();
+  if (captureCtx.state === 'suspended') await captureCtx.resume();
+
+  sourceNode = captureCtx.createMediaStreamSource(mediaStream);
+
+  analyser = captureCtx.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0.65;
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+  sourceNode.connect(analyser);
+
+  const mute = captureCtx.createGain();
+  mute.gain.value = 0;
+  mute.connect(captureCtx.destination);
+
+  processor = captureCtx.createScriptProcessor(4096, 1, 1);
+  const srcRate = captureCtx.sampleRate;
+  processor.onaudioprocess = (ev) => {
+    const ch = ev.inputBuffer.getChannelData(0);
+    const rs = resample(ch, srcRate, TARGET_RATE);
+    for (let i = 0; i < rs.length; i++) sampleAccum.push(rs[i]);
+    while (sampleAccum.length >= TARGET_SAMPLES) {
+      const chunk = sampleAccum.splice(0, TARGET_SAMPLES);
+      api.sendAudioChunkUp(floatToPcm16Base64(chunk));
+    }
+  };
+  sourceNode.connect(processor);
+  processor.connect(mute);
+
+  startBandsLoop();
+}
+
+function stopCapture() {
+  if (bandsTimer) { clearInterval(bandsTimer); bandsTimer = null; }
+  try { if (processor) processor.disconnect(); } catch (e) {}
+  try { if (sourceNode) sourceNode.disconnect(); } catch (e) {}
+  try { if (analyser) analyser.disconnect(); } catch (e) {}
+  processor = sourceNode = analyser = null;
+  if (mediaStream) { mediaStream.getTracks().forEach((t) => t.stop()); mediaStream = null; }
+  if (captureCtx) { captureCtx.close(); captureCtx = null; }
+  sampleAccum = [];
+  smooth = { low: 0, mid: 0, high: 0, all: 0 };
+  api.sendAudioBands({ low: 0, mid: 0, high: 0, all: 0 });
+}
+
+/* ---------------- 频谱到四频段（喂球体） ---------------- */
+
+function bandEnergy(freqArray, minHz, maxHz, hzPerBin) {
+  const start = Math.max(0, Math.floor(minHz / hzPerBin));
+  const end = Math.min(freqArray.length - 1, Math.ceil(maxHz / hzPerBin));
+  if (start >= end) return 0;
+  let sum = 0;
+  for (let i = start; i <= end; i++) sum += freqArray[i];
+  return sum / (end - start + 1) / 255;
+}
+
+function startBandsLoop() {
+  if (bandsTimer) return;
+  lastBandsTs = performance.now();
+  const tick = () => {
+    // 同时从麦克风输入 (analyser) 和 AI 下行播报 (playAnalyser) 提取频谱
+    let rawLow = 0, rawMid = 0, rawHigh = 0;
+    let hasSignal = false;
+
+    if (analyser && freqData) {
+      analyser.getByteFrequencyData(freqData);
+      const sr = captureCtx ? captureCtx.sampleRate : 48000;
+      const hzPerBin = sr / 2 / freqData.length;
+      const l = bandEnergy(freqData, 30, 200, hzPerBin);
+      const m = bandEnergy(freqData, 200, 2000, hzPerBin);
+      const h = bandEnergy(freqData, 2000, 16000, hzPerBin);
+      rawLow = Math.max(rawLow, l);
+      rawMid = Math.max(rawMid, m);
+      rawHigh = Math.max(rawHigh, h);
+      if (l > 0.01 || m > 0.01 || h > 0.01) hasSignal = true;
+    }
+
+    if (playAnalyser && playFreqData) {
+      playAnalyser.getByteFrequencyData(playFreqData);
+      const sr = playCtx ? playCtx.sampleRate : TARGET_RATE;
+      const hzPerBin = sr / 2 / playFreqData.length;
+      const l = bandEnergy(playFreqData, 30, 200, hzPerBin);
+      const m = bandEnergy(playFreqData, 200, 2000, hzPerBin);
+      const h = bandEnergy(playFreqData, 2000, 16000, hzPerBin);
+      rawLow = Math.max(rawLow, l);
+      rawMid = Math.max(rawMid, m);
+      rawHigh = Math.max(rawHigh, h);
+      if (l > 0.01 || m > 0.01 || h > 0.01) hasSignal = true;
+    }
+
+    const now = performance.now();
+    const dt = Math.max(0.001, (now - lastBandsTs) / 1000);
+    lastBandsTs = now;
+
+    const rawAll = rawLow * 0.45 + rawMid * 0.4 + rawHigh * 0.25;
+
+    const smoothTo = (cur, target) => {
+      const tau = target > cur ? 0.05 : 0.22;
+      const a = 1 - Math.exp(-dt / tau);
+      return cur + a * (target - cur);
+    };
+    const SENS = 2.0; // 提高频谱灵敏度
+    smooth.low = smoothTo(smooth.low, rawLow * SENS);
+    smooth.mid = smoothTo(smooth.mid, rawMid * SENS);
+    smooth.high = smoothTo(smooth.high, rawHigh * SENS);
+    smooth.all = smoothTo(smooth.all, rawAll * SENS);
+
+    const cl = (v) => Math.max(0, Math.min(1, Math.round(v * 1000) / 1000));
+    api.sendAudioBands({ low: cl(smooth.low), mid: cl(smooth.mid), high: cl(smooth.high), all: cl(smooth.all) });
+  };
+  bandsTimer = setInterval(tick, 30);
+}
+
+/* ---------------- 音频：播放（下行） ---------------- */
+
+let playCtx = null, playGain = null, playAnalyser = null, playFreqData = null;
+let nextPlayTime = 0;
+let activeSources = [];
+
+function ensurePlayCtx() {
+  if (playCtx) return;
+  playCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_RATE });
+  playGain = playCtx.createGain();
+  
+  // 建立播放端频谱分析节点，使 AI 说话时同样实时驱动球体
+  playAnalyser = playCtx.createAnalyser();
+  playAnalyser.fftSize = 2048;
+  playAnalyser.smoothingTimeConstant = 0.55;
+  playFreqData = new Uint8Array(playAnalyser.frequencyBinCount);
+
+  playGain.connect(playAnalyser);
+  playAnalyser.connect(playCtx.destination);
+  nextPlayTime = playCtx.currentTime;
+
+  startBandsLoop();
+}
+
+function pcm16Base64ToFloat(b64) {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  const i16 = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
+  const f32 = new Float32Array(i16.length);
+  for (let i = 0; i < i16.length; i++) f32[i] = i16[i] < 0 ? i16[i] / 32768 : i16[i] / 32767;
+  return f32;
+}
+
+function playChunk(b64) {
+  if (!b64) return;
+  ensurePlayCtx();
+  const f32 = pcm16Base64ToFloat(b64);
+  if (!f32.length) return;
+
+  const buf = playCtx.createBuffer(1, f32.length, TARGET_RATE);
+  buf.getChannelData(0).set(f32);
+  const src = playCtx.createBufferSource();
+  src.buffer = buf;
+  src.connect(playGain);
+
+  const now = playCtx.currentTime;
+  if (nextPlayTime < now) nextPlayTime = now + 0.005;
+  src.start(nextPlayTime);
+  nextPlayTime += buf.duration;
+  activeSources.push(src);
+  src.onended = () => {
+    const i = activeSources.indexOf(src);
+    if (i !== -1) activeSources.splice(i, 1);
+  };
+}
+
+function flushPlayback() {
+  for (const s of activeSources) { try { s.stop(); s.disconnect(); } catch (e) {} }
+  activeSources = [];
+  if (playCtx) nextPlayTime = playCtx.currentTime;
+  try { api.sendAudioBands({ low: 0, mid: 0, high: 0, all: 0 }); } catch (e) {}
+}
+
+api.onAudioChunkDown((p) => {
+  if (p && p.pcmBase64) playChunk(p.pcmBase64);
+});
+api.onAudioFlush(() => {
+  flushPlayback();
+  toast('已打断，播放缓冲已清空');
+});
+
+/* ---------------- 工具确认弹窗 ---------------- */
+
+const confirmDlg = $('confirmDlg');
+let currentConfirmId = null;
+
+api.onConfirmRequest((req) => {
+  currentConfirmId = req.requestId;
+  $('cfmTitle').textContent = req.title || '需要你确认';
+  $('cfmDesc').textContent = req.explanation || '';
+  $('cfmTarget').textContent = req.target || '';
+  confirmDlg.showModal();
+});
+
+$('cfmApprove').onclick = () => {
+  if (currentConfirmId) api.respondConfirm({ requestId: currentConfirmId, approved: true });
+  confirmDlg.close();
+};
+$('cfmReject').onclick = () => {
+  if (currentConfirmId) api.respondConfirm({ requestId: currentConfirmId, approved: false });
+  confirmDlg.close();
+};
+confirmDlg.addEventListener('cancel', () => {
+  if (currentConfirmId) api.respondConfirm({ requestId: currentConfirmId, approved: false });
+});
+
+/* ---------------- 按钮 ---------------- */
+
+$('btnStart').onclick = async () => {
+  try {
+    const r = await api.sessionStart();
+    if (!r.ok) {
+      toast(r.reason || '启动失败');
+      addMsg('system', r.reason || '启动失败');
+      return;
+    }
+    await startCapture();
+    addMsg('system', '会话已启动，可以直接说话，或在下方输入文字。');
+    toast('会话已启动');
+  } catch (e) {
+    const m = e && e.message ? e.message : String(e);
+    addMsg('system', '启动失败：' + m);
+    toast('启动失败');
+  }
+};
+
+$('btnStop').onclick = async () => {
+  stopCapture();
+  flushPlayback();
+  await api.sessionStop();
+  addMsg('system', '会话已停止。');
+  toast('会话已停止');
+};
+
+$('btnInterrupt').onclick = async () => { await api.interrupt(); };
+
+$('btnScreen').onclick = async () => {
+  toast('正在截取屏幕并分析...');
+  const r = await api.visionCapture({ prompt: '请描述这个窗口的内容；如果有报错或异常，请解释原因并给出建议。', target: 'active_window' });
+  if (r && r.success) {
+    if (r.previewDataUrl) onMessage({ screenshot: r.previewDataUrl });
+    addMsg('assistant', r.analysisText);
+  } else {
+    addMsg('system', '屏幕理解失败：' + ((r && r.errorMessage) || '未知错误'));
+  }
+};
+
+function sendText() {
+  const el = $('input');
+  const text = el.value.trim();
+  if (!text) return;
+  el.value = '';
+  el.style.height = 'auto';
+  api.sendText(text);
+}
+$('btnSend').onclick = sendText;
+$('input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendText(); }
+});
+$('input').addEventListener('input', (e) => {
+  e.target.style.height = 'auto';
+  e.target.style.height = Math.min(120, e.target.scrollHeight) + 'px';
+});
+
+/* ---------------- 设置 ---------------- */
+
+async function loadConfig() {
+  try {
+    const c = await api.getConfig();
+    $('keyHint').textContent = c.apiKeyPresent ? ('已配置：' + c.apiKeyMasked) : '尚未配置，语音功能不可用';
+    
+    // 音色回显
+    const voiceVal = c.voice || 'cixingnansheng';
+    const voiceOptions = ['cixingnansheng', 'zhengpaiqingnian', 'wenrounvsheng', 'tianmeinvsheng', 'qingnianyin'];
+    if (voiceOptions.includes(voiceVal)) {
+      $('voiceSelect').value = voiceVal;
+      $('customVoiceInput').style.display = 'none';
+    } else {
+      $('voiceSelect').value = 'custom';
+      $('customVoiceInput').style.display = 'inline-block';
+      $('customVoiceInput').value = voiceVal;
+    }
+
+    $('model').value = c.realtimeModel || '';
+    $('rtUrl').value = c.realtimeBaseUrl || '';
+    $('visionModel').value = c.visionModel || '';
+    $('visionBaseUrl').value = c.visionBaseUrl || '';
+    $('visionKeyHint').textContent = c.visionApiKeyPresent
+      ? ('已单独配置：' + c.visionApiKey)
+      : '未单独配置，默认沿用主 API Key';
+
+    $('allowedDirs').value = (c.allowedDirectories || []).join('\n');
+    $('cfgPath').textContent = c.configPath || '未知';
+    $('mcpStatus').textContent = (c.mcp && c.mcp.ready)
+      ? ('已就绪，' + c.mcp.toolCount + ' 个工具')
+      : (c.mcpEnabled ? '已就绪/待连接' : '已禁用');
+  } catch (e) {
+    $('keyHint').textContent = '读取配置失败：' + (e && e.message ? e.message : e);
+  }
+}
+
+$('voiceSelect').onchange = () => {
+  if ($('voiceSelect').value === 'custom') {
+    $('customVoiceInput').style.display = 'inline-block';
+    $('customVoiceInput').focus();
+  } else {
+    $('customVoiceInput').style.display = 'none';
+  }
+};
+
+$('btnSaveVoice').onclick = async () => {
+  let v = $('voiceSelect').value;
+  if (v === 'custom') {
+    v = $('customVoiceInput').value.trim();
+  }
+  if (!v) { toast('请指定音色代码'); return; }
+  await api.setConfig({ voice: v });
+  toast('音色已更新为 ' + v);
+  loadConfig();
+};
+
+$('btnSaveKey').onclick = async () => {
+  const v = $('apiKey').value.trim();
+  if (!v) { toast('请先粘贴 API Key'); return; }
+  await api.setConfig({ apiKey: v });
+  $('apiKey').value = '';
+  toast('API Key 已保存');
+  loadConfig();
+};
+
+$('btnSaveModel').onclick = async () => {
+  await api.setConfig({ realtimeModel: $('model').value.trim() });
+  toast('模型已更新，重开会话后生效');
+  loadConfig();
+};
+
+$('btnSaveRtUrl').onclick = async () => {
+  await api.setConfig({ realtimeBaseUrl: $('rtUrl').value.trim() });
+  toast('接口地址已更新，重开会话后生效');
+  loadConfig();
+};
+
+$('btnSaveVision').onclick = async () => {
+  await api.setConfig({ visionModel: $('visionModel').value.trim() });
+  toast('屏幕理解模型已更新');
+  loadConfig();
+};
+
+$('btnSaveVisionUrl').onclick = async () => {
+  await api.setConfig({ visionBaseUrl: $('visionBaseUrl').value.trim() });
+  toast('视觉接口地址已更新');
+  loadConfig();
+};
+
+$('btnSaveVisionKey').onclick = async () => {
+  const v = $('visionApiKey').value.trim();
+  await api.setConfig({ visionApiKey: v });
+  $('visionApiKey').value = '';
+  toast(v ? '视觉专属 Key 已保存' : '已清除独立视觉 Key，沿用主 Key');
+  loadConfig();
+};
+
+$('btnSaveDirs').onclick = async () => {
+  const dirs = $('allowedDirs').value.split('\n').map((s) => s.trim()).filter(Boolean);
+  await api.setConfig({ allowedDirectories: dirs });
+  toast(dirs.length ? '白名单已保存' : '白名单为空，工具执行已禁用');
+  loadConfig();
+};
+
+$('btnGpu').onclick = async () => {
+  const r = await api.gpuCheck();
+  $('gpuStatus').textContent = r.supported
+    ? ('可用（' + ((r.adapterInfo && (r.adapterInfo.description || r.adapterInfo.vendor)) || '已检测') + '）')
+    : ('不可用：' + (r.error || '未知原因'));
+  toast(r.supported ? 'WebGPU 可用' : 'WebGPU 不可用，球体无法渲染');
+};
+
+/* ---------------- 初始化 ---------------- */
+
+setState('idle');
+loadConfig();
+setInterval(loadConfig, 8000);
+</script>
+</body>
+</html>

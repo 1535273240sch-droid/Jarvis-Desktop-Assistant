@@ -1,0 +1,59 @@
+{
+  "name": "jarvis-desktop-assistant",
+  "version": "1.0.0",
+  "description": "Jarvis - Windows 11 桌面 AI 助手（悬浮球 + 实时语音 + 工具执行 + 屏幕视觉）",
+  "main": "dist/main/index.js",
+  "author": "Jarvis Team",
+  "license": "MIT",
+  "scripts": {
+    "build:orb": "node scripts/generate-orb.mjs",
+    "build:ts": "tsc -p tsconfig.json",
+    "build": "node scripts/build.mjs",
+    "start": "npm run build && electron .",
+    "selftest": "npm run build && electron . --selftest",
+    "dist": "npm run build && electron-builder --win nsis",
+    "pack": "npm run build && electron-builder --win nsis --dir"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/ws": "^8.5.13",
+    "electron": "^34.2.0",
+    "electron-builder": "^25.1.8",
+    "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "@wonderwhy-er/desktop-commander": "^0.2.27",
+    "ws": "^8.18.0"
+  },
+  "build": {
+    "appId": "com.jarvis.desktop.assistant",
+    "productName": "Jarvis",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "Jarvis-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Jarvis"
+    },
+    "asarUnpack": [
+      "**/node_modules/**"
+    ]
+  }
+}
