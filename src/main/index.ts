@@ -16,6 +16,7 @@ import { desktopController } from "./desktop-control";
 import { armEmergencyStop, disposeEmergencyStop } from "./emergency-stop";
 import { isAuthorized, ensureAutoAuthorized } from "./authorization";
 import { registerIpcHandlers } from "./ipc";
+import { initAutoUpdater, setUpdaterPanelResolver } from "./updater";
 import { ASSISTANT_STATES, IPC } from "../common/types";
 import type { AssistantState } from "../common/types";
 
@@ -206,6 +207,38 @@ function createTray(): void {
             dialog.showErrorBox(
               "WebGPU 自检未通过",
               `${r.error}\n\n球体硬依赖 WebGPU 且无降级方案，请检查显卡驱动或系统图形设置。`
+            );
+          }
+        },
+      },
+      {
+        label: "检查更新",
+        click: async () => {
+          const { autoUpdater } = require("electron-updater");
+          try {
+            dialog.showMessageBox({
+              type: "info",
+              title: "检查更新",
+              message: "正在检查最新版本...",
+            });
+            const r = await autoUpdater.checkForUpdates();
+            if (!r) {
+              dialog.showMessageBox({
+                type: "info",
+                title: "检查更新",
+                message: "当前已是最新版本。",
+              });
+            } else {
+              dialog.showMessageBox({
+                type: "info",
+                title: "检查更新",
+                message: `发现新版本 v${r.updateInfo.version}，正在后台下载。`,
+              });
+            }
+          } catch (e) {
+            dialog.showErrorBox(
+              "检查更新失败",
+              `无法访问更新源：${(e as Error).message}\n\n请检查网络或确认已配置 GitHub Token。`
             );
           }
         },
@@ -517,6 +550,10 @@ app.whenReady().then(async () => {
 
   // 6) 托盘
   createTray();
+
+  // 6b) 自动更新（含面板解析器绑定）
+  setUpdaterPanelResolver(() => panelWindow);
+  initAutoUpdater();
 
   // 7) 球体加载完成后的健康检查
   orbWindow.webContents.on("did-finish-load", async () => {
