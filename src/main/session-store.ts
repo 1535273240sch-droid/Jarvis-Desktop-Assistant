@@ -1,10 +1,16 @@
 import { EventEmitter } from "node:events";
 import { logger } from "./logger";
+import { memoryStore } from "./memory";
 import type { ChatMessage } from "../common/types";
 
 /**
  * 会话存储：聊天消息、模型上下文历史、以及供 30 分钟会话重建时迁移用的摘要。
  * 注意：音频不落盘（只保留文本与元数据）。
+ *
+ * 持久化边界：
+ *   - messages 仍为内存态（仅界面渲染用，重启后由历史对话回填即可）。
+ *   - contextHistory 会同步写入 memoryStore，并在启动时回填，
+ *     这样「关掉重开」后模型仍能延续上一轮的上下文。
  */
 
 let seq = 0;
@@ -17,6 +23,22 @@ class SessionStore extends EventEmitter {
   private messages: ChatMessage[] = [];
   /** 供会话重建回注的历史（仅文本，序列化友好） */
   private contextHistory: Array<{ role: "user" | "assistant"; text: string }> = [];
+
+  constructor() {
+    super();
+    // 启动时从长期记忆回填上下文：这样重启后新会话仍能延续上一轮的话题。
+    // 注意这里只回填 contextHistory（供模型参考），不伪造聊天记录气泡，
+    // 避免界面出现用户没见过的历史消息。
+    try {
+      const restored = memoryStore.getTurns(100);
+      if (restored.length) {
+        this.contextHistory = restored.map((t) => ({ role: t.role, text: t.text }));
+        logger.info(`[SessionStore] 已从长期记忆回填 ${restored.length} 轮上下文`);
+      }
+    } catch (e) {
+      logger.warn("[SessionStore] 上下文回填失败:", e);
+    }
+  }
 
   getMessages(): ChatMessage[] {
     return this.messages.map((m) => ({ ...m }));
@@ -58,6 +80,12 @@ class SessionStore extends EventEmitter {
     this.contextHistory.push({ role, text: t });
     if (this.contextHistory.length > 100) {
       this.contextHistory.splice(0, this.contextHistory.length - 100);
+    }
+    // 同步落盘，使上下文跨进程存活（这是「重启就忘」的修复点）
+    try {
+      memoryStore.appendTurn(role, t);
+    } catch (e) {
+      logger.warn("[SessionStore] 写入长期记忆失败:", e);
     }
   }
 

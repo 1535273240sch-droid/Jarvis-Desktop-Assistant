@@ -785,7 +785,11 @@ let bandsTimer = null;
 let smooth = { low: 0, mid: 0, high: 0, all: 0 };
 let lastBandsTs = 0;
 const TARGET_RATE = 24000;
-const CHUNK_MS = 100;
+// 上行分片间隔。原为 100ms：配合 4096 帧的 ScriptProcessor（48kHz 下约 85ms 一次回调），
+// 实际要凑满 2400 个 24kHz 采样点才发一次，累计引入约 170ms 的发送延迟。
+// 改为 40ms 并在下面把缓冲降到 2048 帧后，约每个回调（≈43ms）即可发出一次，
+// 上行延迟降到 ~43ms，是「响应慢」体感的主要改善点之一。
+const CHUNK_MS = 40;
 const TARGET_SAMPLES = TARGET_RATE * CHUNK_MS / 1000;
 
 function floatToPcm16Base64(samples) {
@@ -839,7 +843,11 @@ async function startCapture() {
   mute.gain.value = 0;
   mute.connect(captureCtx.destination);
 
-  processor = captureCtx.createScriptProcessor(4096, 1, 1);
+  // 2048 帧（48kHz 下约 43ms 回调）而非 4096（约 85ms）：
+  // ScriptProcessor 已废弃且跑在主线程，缓冲越大上行延迟越高。
+  // 这里不换成 AudioWorklet 是因为需要独立的 worklet 模块文件，
+  // 在打包与 CSP 下风险更高；缩小缓冲已能拿回大部分延迟收益。
+  processor = captureCtx.createScriptProcessor(2048, 1, 1);
   const srcRate = captureCtx.sampleRate;
   processor.onaudioprocess = (ev) => {
     const ch = ev.inputBuffer.getChannelData(0);

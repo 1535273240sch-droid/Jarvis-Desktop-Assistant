@@ -9,6 +9,7 @@ import { desktopController } from "./desktop-control";
 import { safetyManager } from "./safety";
 import { orbController } from "./orb-control";
 import { configManager } from "./config";
+import { memoryStore } from "./memory";
 import { onEmergencyStopInterrupt } from "./emergency-stop";
 import { isAuthorized, ensureAutoAuthorized } from "./authorization";
 import { IPC } from "../common/types";
@@ -97,7 +98,107 @@ const BUILTIN_TOOLS = [
       parameters: { type: "object", properties: {} },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "get_current_time",
+      description:
+        "获取当前准确的日期与时间。当用户问「现在几点」「今天几号」「今天星期几」时必须调用，不要凭记忆回答。",
+      parameters: {
+        type: "object",
+        properties: {
+          timezone: {
+            type: "string",
+            description: "IANA 时区名，例如 Asia/Shanghai、America/New_York。默认使用本机时区。",
+          },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_weather",
+      description:
+        "查询指定城市的实时天气与未来几天预报（联网获取）。当用户问「今天天气怎么样」「明天会下雨吗」时必须调用，不要凭记忆回答。",
+      parameters: {
+        type: "object",
+        properties: {
+          location: { type: "string", description: "城市名，例如「北京」「上海」「深圳」" },
+          days: { type: "number", description: "预报天数 1-7，默认 3" },
+        },
+        required: ["location"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "web_fetch",
+      description:
+        "抓取指定网址的页面内容并返回纯文本。当用户给出链接、或需要从网上获取具体信息（新闻、文档、API 返回值）时调用。注意：这是按 URL 抓取，不是关键词搜索。",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "要抓取的完整网址，必须以 http:// 或 https:// 开头" },
+        },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "remember_fact",
+      description:
+        "把用户希望长期记住的信息写入本机长期记忆，重启后依然有效。当用户说「记住…」「以后都…」「我的…是…」时调用。只记录稳定的事实与偏好，不要记录一次性闲聊。",
+      parameters: {
+        type: "object",
+        properties: {
+          fact: { type: "string", description: "要长期记住的内容，用一句简洁的陈述句，例如「用户偏好喝美式咖啡」" },
+        },
+        required: ["fact"],
+      },
+    },
+  },
 ];
+
+/** WMO 天气代码 -> 中文描述（Open-Meteo 使用 WMO 4677 编码） */
+function describeWeatherCode(code: unknown): string {
+  const c = Number(code);
+  if (!Number.isFinite(c)) return "未知";
+  const map: Record<number, string> = {
+    0: "晴",
+    1: "晴间多云",
+    2: "多云",
+    3: "阴",
+    45: "有雾",
+    48: "雾凇",
+    51: "小毛毛雨",
+    53: "毛毛雨",
+    55: "大毛毛雨",
+    56: "冻毛毛雨",
+    57: "强冻毛毛雨",
+    61: "小雨",
+    63: "中雨",
+    65: "大雨",
+    66: "冻雨",
+    67: "强冻雨",
+    71: "小雪",
+    73: "中雪",
+    75: "大雪",
+    77: "米雪",
+    80: "小阵雨",
+    81: "阵雨",
+    82: "强阵雨",
+    85: "小阵雪",
+    86: "强阵雪",
+    95: "雷阵雨",
+    96: "雷阵雨伴小冰雹",
+    99: "雷阵雨伴大冰雹",
+  };
+  return map[c] ?? `未知天气(代码${c})`;
+}
 
 class Orchestrator {
   private panelGetter: (() => BrowserWindow | null) | null = null;
@@ -216,34 +317,34 @@ class Orchestrator {
       return { ok: false, reason };
     }
 
-    // 1) 先在连接**之前**启动 MCP（工具清单要在会话建立后立刻下发，
-    //    否则模型在头几轮没有工具可调）
-    let toolsReady = false;
-    if (configManager.get().mcpEnabled && !mcpClient.isReady()) {
-      const r = await mcpClient.start();
-      if (!r.ok) {
-        logger.warn(`[Orchestrator] MCP 未启动：${r.reason}`);
-      } else {
-        toolsReady = true;
-      }
-    } else if (mcpClient.isReady()) {
-      toolsReady = true;
-    }
-
-    // 2) 连接实时会话。
-    //    注意：session.update（含工具定义）必须在**收到 session.created 之后**下发，
-    //    否则 WebSocket 还没 open，消息会被丢弃（此前正是在连接前下发，导致工具丢失）。
+    // session.update（含工具定义）必须在**收到 session.created 之后**下发，
+    // 否则 WebSocket 还没 open，消息会被丢弃。
+    //
+    // 关键修复：这里**无条件**先下发一次工具集。
+    // 此前只在 MCP 就绪时才下发，MCP 失败时仅更新了界面列表却没把工具定义
+    // 告诉模型 —— 模型手里零工具，只能嘴上答应「好的我来做」而不会真的执行，
+    // 表现为「调 5 次只有 1 次做对」（MCP 偶尔起来那次才成功）。
     realtimeClient.once("sessionCreated", () => {
-      if (toolsReady) {
-        this.pushToolsToModel();
-      } else {
-        logger.info("[Orchestrator] MCP 不可用，仅下发内置工具");
-        this.broadcast(IPC.TOOL_LIST, { tools: BUILTIN_TOOLS.map((t: any) => t.function.name) });
-      }
+      this.pushToolsToModel();
     });
 
     realtimeClient.connect();
     this.started = true;
+
+    // MCP 改为**后台启动**：不再 await 阻塞会话建立。
+    // 其 rpc 默认超时 60 秒，冷启动慢时会让用户点了「开始」却长时间连不上。
+    // 就绪后 mcpClient 会 emit "tools"，由 init() 中注册的监听触发
+    // pushToolsToModel() 把 MCP 工具补齐下发。
+    if (configManager.get().mcpEnabled && !mcpClient.isReady()) {
+      logger.info("[Orchestrator] MCP 转入后台启动，不阻塞会话建立");
+      mcpClient
+        .start()
+        .then((r) => {
+          if (!r.ok) logger.warn(`[Orchestrator] MCP 后台启动未成功：${r.reason}`);
+        })
+        .catch((e) => logger.error("[Orchestrator] MCP 后台启动异常:", e));
+    }
+
     return { ok: true };
   }
 
@@ -429,9 +530,217 @@ class Orchestrator {
         return { ok: !msg.includes("拒绝"), output: `已请求关闭窗口「${win.title}」：${msg}` };
       }
 
+      case "get_current_time": {
+        const tz =
+          typeof args.timezone === "string" && args.timezone.trim() ? args.timezone.trim() : undefined;
+        const now = new Date();
+        let full: string;
+        try {
+          full = new Intl.DateTimeFormat("zh-CN", {
+            timeZone: tz,
+            year: "numeric",
+            month: "2-digit",
+            day: "2-digit",
+            weekday: "long",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+          }).format(now);
+        } catch {
+          return {
+            ok: false,
+            output: `时区名「${tz}」无效。请使用 IANA 时区名，例如 Asia/Shanghai。`,
+          };
+        }
+        const zone = tz || Intl.DateTimeFormat().resolvedOptions().timeZone || "本机时区";
+        return {
+          ok: true,
+          output: `当前时间：${full}（时区：${zone}）。UTC 时间戳：${now.toISOString()}。请直接把这个结果告诉用户。`,
+        };
+      }
+
+      case "get_weather": {
+        const location = String(args.location || "").trim();
+        if (!location) return { ok: false, output: "请提供城市名，例如「北京」。" };
+        const daysRaw = Number(args.days);
+        const days = Number.isFinite(daysRaw) ? Math.max(1, Math.min(7, Math.floor(daysRaw))) : 3;
+
+        try {
+          stateMachine.transition("thinking", `正在查询 ${location} 的天气…`);
+          const geo = await this.fetchJson(
+            `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(
+              location
+            )}&count=1&language=zh&format=json`
+          );
+          const hit = geo?.results?.[0];
+          if (!hit) {
+            return { ok: false, output: `没有找到城市「${location}」，请换用更常见的名称（如「北京」「上海」）。` };
+          }
+
+          const wx = await this.fetchJson(
+            `https://api.open-meteo.com/v1/forecast?latitude=${hit.latitude}&longitude=${hit.longitude}` +
+              `&current=temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,weather_code,wind_speed_10m` +
+              `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max` +
+              `&timezone=auto&forecast_days=${days}`
+          );
+
+          const place = [hit.name, hit.admin1, hit.country].filter(Boolean).join("，");
+          const cur = wx?.current || {};
+          const lines: string[] = [];
+          lines.push(`${place} 当前天气：${describeWeatherCode(cur.weather_code)}，气温 ${cur.temperature_2m}°C` +
+            (cur.apparent_temperature !== undefined ? `（体感 ${cur.apparent_temperature}°C）` : "") +
+            (cur.relative_humidity_2m !== undefined ? `，湿度 ${cur.relative_humidity_2m}%` : "") +
+            (cur.wind_speed_10m !== undefined ? `，风速 ${cur.wind_speed_10m} km/h` : "") + "。");
+
+          const d = wx?.daily || {};
+          const times: string[] = Array.isArray(d.time) ? d.time : [];
+          for (let i = 0; i < times.length; i++) {
+            const label = i === 0 ? "今天" : i === 1 ? "明天" : i === 2 ? "后天" : times[i];
+            const pop = Array.isArray(d.precipitation_probability_max) ? d.precipitation_probability_max[i] : undefined;
+            lines.push(
+              `${label}（${times[i]}）：${describeWeatherCode(Array.isArray(d.weather_code) ? d.weather_code[i] : undefined)}，` +
+                `${Array.isArray(d.temperature_2m_min) ? d.temperature_2m_min[i] : "?"}~` +
+                `${Array.isArray(d.temperature_2m_max) ? d.temperature_2m_max[i] : "?"}°C` +
+                (pop !== undefined && pop !== null ? `，降水概率 ${pop}%` : "") + "。"
+            );
+          }
+          safetyManager.audit("web_tool_call", { tool: "get_weather", location, days });
+          return { ok: true, output: lines.join("\n") + "\n（数据来源：Open-Meteo）" };
+        } catch (e) {
+          return { ok: false, output: `查询天气失败（网络或服务不可用）：${(e as Error).message}` };
+        }
+      }
+
+      case "web_fetch": {
+        const urlStr = String(args.url || "").trim();
+        if (!urlStr) return { ok: false, output: "请提供要抓取的网址。" };
+        let parsed: URL;
+        try {
+          parsed = new URL(urlStr);
+        } catch {
+          return { ok: false, output: "网址格式不正确，请提供完整链接（含 https://）。" };
+        }
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          return { ok: false, output: "只支持 http/https 链接。" };
+        }
+        if (this.isPrivateHost(parsed.hostname)) {
+          return { ok: false, output: "出于安全考虑，不允许抓取本机或局域网地址。" };
+        }
+
+        try {
+          stateMachine.transition("thinking", "正在抓取网页…");
+          const raw = await this.fetchText(parsed.toString());
+          // 跳转后可能落到内网地址，复查一次
+          try {
+            const finalHost = new URL(raw.finalUrl).hostname;
+            if (this.isPrivateHost(finalHost)) {
+              return { ok: false, output: "该链接跳转到了本机或局域网地址，已阻止。" };
+            }
+          } catch {
+            /* finalUrl 解析失败则跳过复查 */
+          }
+
+          let text = raw.text
+            .replace(/<script[\s\S]*?<\/script>/gi, " ")
+            .replace(/<style[\s\S]*?<\/style>/gi, " ")
+            .replace(/<noscript[\s\S]*?<\/noscript>/gi, " ");
+          text = text
+            .replace(/<[^>]+>/g, " ")
+            .replace(/&nbsp;/g, " ")
+            .replace(/&amp;/g, "&")
+            .replace(/&lt;/g, "<")
+            .replace(/&gt;/g, ">")
+            .replace(/&quot;/g, '"')
+            .replace(/&#39;/g, "'")
+            .replace(/\s+/g, " ")
+            .trim();
+
+          if (!text) return { ok: false, output: "该页面没有可提取的文本内容（可能是纯前端渲染或需要登录）。" };
+          const CAP = 12000;
+          const clipped = text.length > CAP ? text.slice(0, CAP) + "…（内容过长已截断）" : text;
+          safetyManager.audit("web_tool_call", { tool: "web_fetch", url: parsed.toString(), chars: text.length });
+          return { ok: true, output: `来源：${raw.finalUrl}\n\n${clipped}` };
+        } catch (e) {
+          return { ok: false, output: `抓取网页失败：${(e as Error).message}` };
+        }
+      }
+
+      case "remember_fact": {
+        const fact = String(args.fact || "").trim();
+        if (!fact) return { ok: false, output: "没有可记录的内容。" };
+        const added = memoryStore.addFact(fact);
+        safetyManager.audit("memory_write", { fact });
+        return {
+          ok: true,
+          output: added
+            ? `已写入长期记忆：「${fact}」。该信息重启后仍然有效。请简短确认。`
+            : `这条内容之前已经记住了（「${fact}」），未重复写入。请简短确认。`,
+        };
+      }
+
       default:
         return null;
     }
+  }
+
+  /* ---------------- 联网辅助 ---------------- */
+
+  /** 带超时的 JSON GET。失败抛错，由调用方转成可读文案。 */
+  private async fetchJson(url: string, timeoutMs = 12000): Promise<any> {
+    const f = (globalThis as unknown as { fetch?: (u: string, i?: unknown) => Promise<any> }).fetch;
+    if (typeof f !== "function") throw new Error("当前运行环境不支持 fetch");
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await f(url, {
+        signal: ctrl.signal,
+        headers: { "User-Agent": "Jarvis-Desktop-Assistant/1.0" },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return await res.json();
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** 带超时的文本 GET，同时返回最终 URL（用于跳转后复查） */
+  private async fetchText(url: string, timeoutMs = 15000): Promise<{ text: string; finalUrl: string }> {
+    const f = (globalThis as unknown as { fetch?: (u: string, i?: unknown) => Promise<any> }).fetch;
+    if (typeof f !== "function") throw new Error("当前运行环境不支持 fetch");
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await f(url, {
+        signal: ctrl.signal,
+        headers: { "User-Agent": "Jarvis-Desktop-Assistant/1.0" },
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      return { text, finalUrl: String(res.url || url) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** 阻止抓取本机/局域网地址（基础 SSRF 防护，覆盖字面量 IP 与常见内网段） */
+  private isPrivateHost(hostname: string): boolean {
+    const h = (hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+    if (!h) return true;
+    if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) {
+      return true;
+    }
+    if (h === "::1" || h.startsWith("fe80:") || h.startsWith("fc") || h.startsWith("fd")) return true;
+    const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+    if (m) {
+      const a = Number(m[1]);
+      const b = Number(m[2]);
+      if (a === 0 || a === 127 || a === 10) return true;
+      if (a === 192 && b === 168) return true;
+      if (a === 172 && b >= 16 && b <= 31) return true;
+      if (a === 169 && b === 254) return true;
+    }
+    return false;
   }
 
   /* ---------------- 打断 ---------------- */
@@ -440,9 +749,15 @@ class Orchestrator {
    * 原子打断。顺序不可调换：
    *   1) 本地立即静音（清空渲染进程播放缓冲）
    *   2) response.cancel（取消服务端生成）
-   *   3) input_audio_buffer.clear（清空服务端输入缓冲）
-   *   4) 音频频段归零
-   *   5) 状态切到 listening
+   *   3) 音频频段归零
+   *   4) 状态切到 listening
+   *
+   * 重要修复：这里**绝不能**发 input_audio_buffer.clear。
+   *
+   * 打断的触发点是 speech_started —— 服务端刚检测到用户开口的那一刻。
+   * 此刻清空输入缓冲，等于把用户刚说出口的那几个字直接丢掉，服务端只剩
+   * 后半句甚至什么都没有。用户侧的表现就是「它非要把话说完，我说了它没反应」，
+   * 也就是典型的半双工体感。正确做法是只取消**响应**，保留用户的语音输入。
    */
   interrupt(reason = "用户打断"): void {
     logger.info(`[Orchestrator] 触发打断：${reason}`);
@@ -450,16 +765,13 @@ class Orchestrator {
     // 1) 本地静音（必须最先）
     this.broadcast(IPC.AUDIO_FLUSH, {});
 
-    // 2) 取消服务端响应
+    // 2) 取消服务端响应（只取消回复，不动用户输入缓冲）
     realtimeClient.cancelResponse();
 
-    // 3) 清空服务端输入缓冲，避免把打断时说的话和上一轮混淆
-    realtimeClient.clearInputBuffer();
-
-    // 4) 球体频段归零
+    // 3) 球体频段归零
     orbController.setAudioBands().catch(() => undefined);
 
-    // 5) 状态收敛
+    // 4) 状态收敛
     stateMachine.transition("listening", `打断：${reason}`, { force: true });
     safetyManager.audit("interrupt", { reason });
   }

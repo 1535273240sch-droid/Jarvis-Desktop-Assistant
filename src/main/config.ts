@@ -7,20 +7,41 @@ import type { JarvisConfig } from "../common/types";
 
 /**
  * 获取系统推荐的安全工作目录作为默认白名单
+ *
+ * Win11 上「桌面/文档/下载」经常被 OneDrive 重定向到
+ *   C:\Users\X\OneDrive\Desktop
+ * 此时 os.homedir()\Desktop 并不存在。原实现只探测常规路径，
+ * 会把白名单缩到只剩 process.cwd()，助手因此访问不到用户真正的桌面与文档。
+ * 这里补上 OneDrive 候选，并在全部落空时退回家目录。
  */
 function getDefaultAllowedDirs(): string[] {
   const dirs: string[] = [];
+  const push = (p: string): void => {
+    try {
+      if (p && fs.existsSync(p) && !dirs.includes(p)) dirs.push(p);
+    } catch {
+      /* ignore */
+    }
+  };
+
   try {
     const home = os.homedir();
-    const desktop = path.join(home, "Desktop");
-    if (fs.existsSync(desktop)) dirs.push(desktop);
-    const downloads = path.join(home, "Downloads");
-    if (fs.existsSync(downloads)) dirs.push(downloads);
-    const documents = path.join(home, "Documents");
-    if (fs.existsSync(documents)) dirs.push(documents);
+    const sub = ["Desktop", "Downloads", "Documents"];
+
+    // 常规位置
+    for (const s of sub) push(path.join(home, s));
+
+    // OneDrive 重定向位置（名称随语言/账户而异）
+    for (const od of ["OneDrive", "OneDrive - Personal", "OneDrive - 个人", "OneDrive - 公司"]) {
+      for (const s of sub) push(path.join(home, od, s));
+    }
+
+    // 兜底：常规与 OneDrive 都没命中时退回家目录，避免白名单过窄导致文件能力不可用
+    if (!dirs.length) push(home);
   } catch {
     /* ignore */
   }
+
   const cwd = process.cwd();
   if (cwd && !dirs.includes(cwd)) dirs.push(cwd);
   return dirs;

@@ -3,6 +3,7 @@ import WebSocket from "ws";
 import { logger } from "./logger";
 import { configManager } from "./config";
 import { sessionStore } from "./session-store";
+import { memoryStore } from "./memory";
 import type { SessionStatus } from "../common/types";
 
 /**
@@ -182,6 +183,41 @@ export class RealtimeClient extends EventEmitter {
 
   /* ---------------- 会话配置 ---------------- */
 
+  /**
+   * 组装发给服务端的 instructions：用户配置 + 跨会话记忆。
+   * 记忆为空时返回原文，避免无谓污染提示词。
+   */
+  private composeInstructions(): string {
+    const base = configManager.get().instructions;
+    let block = "";
+    try {
+      block = memoryStore.buildPromptBlock();
+    } catch (e) {
+      logger.warn("[Realtime] 读取长期记忆失败:", e);
+    }
+    return block ? `${base}\n\n${block}` : base;
+  }
+
+  /**
+   * 语音活动检测（VAD）配置。
+   *
+   * 关键点：`interrupt_response` 必须显式写出来。
+   * 本项目的实时端点是 StepFun（非 OpenAI 官方），跨实现时「依赖对方默认值」很脆：
+   * 一旦服务端默认不打断，就会出现「AI 一定要把话说完才开始听你说」的半双工体感。
+   * create_response 同理：显式声明由服务端在检测到语音结束后自动生成回复，
+   * 避免依赖默认值导致「说完没反应」。
+   */
+  private turnDetectionConfig(): Record<string, unknown> {
+    return {
+      type: "server_vad",
+      prefix_padding_ms: 500,
+      silence_duration_ms: 100,
+      energy_awakeness_threshold: 2500,
+      create_response: true,
+      interrupt_response: true,
+    };
+  }
+
   private sendSessionUpdate(): void {
     const cfg = configManager.get();
     this.send({
@@ -190,16 +226,11 @@ export class RealtimeClient extends EventEmitter {
         // modalities 在会话配置里显式声明，确保服务端自动创建响应时也带音频输出。
         // （实测：不声明时，server_vad 自动触发的响应可能只产出文本，没有 audio.delta）
         modalities: ["text", "audio"],
-        instructions: cfg.instructions,
+        instructions: this.composeInstructions(),
         voice: cfg.voice,
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
-        turn_detection: {
-          type: "server_vad",
-          prefix_padding_ms: 500,
-          silence_duration_ms: 100,
-          energy_awakeness_threshold: 2500,
-        },
+        turn_detection: this.turnDetectionConfig(),
       },
     });
     logger.info("[Realtime] 已下发 session.update");
@@ -215,12 +246,16 @@ export class RealtimeClient extends EventEmitter {
       this.emit("error", "本次会话已开始播报，音色在本会话内不可更改。请重开会话后再试。", false);
       return false;
     }
-    const cfg = configManager.get();
     configManager.set({ voice });
     if (this.isConnected()) {
       this.send({
         type: "session.update",
-        session: { instructions: cfg.instructions, voice, input_audio_format: "pcm16", output_audio_format: "pcm16" },
+        session: {
+          instructions: this.composeInstructions(),
+          voice,
+          input_audio_format: "pcm16",
+          output_audio_format: "pcm16",
+        },
       });
     }
     return true;
@@ -327,10 +362,13 @@ export class RealtimeClient extends EventEmitter {
     this.send({
       type: "session.update",
       session: {
-        instructions: cfg.instructions,
+        instructions: this.composeInstructions(),
         voice: cfg.voice,
         input_audio_format: "pcm16",
         output_audio_format: "pcm16",
+        // 一并重申 turn_detection：若服务端把 session.update 当作整体替换，
+        // 只带 tools 会把 VAD 配置（含 interrupt_response）重置回默认值。
+        turn_detection: this.turnDetectionConfig(),
         tools,
       },
     });
