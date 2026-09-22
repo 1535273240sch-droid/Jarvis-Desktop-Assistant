@@ -28,32 +28,50 @@ jobs:
       - name: Enable pnpm (for vendor/orb)
         run: corepack enable && corepack prepare pnpm@11.19.0 --activate
 
-      # 关键：把构建号真正写进 package.json 的 version。
-      # electron-updater 比较的是 app 版本号与 latest.yml 里的 version，
-      # 两者都源自 package.json；只改 release tag 名不会触发更新。
+      # 把构建号写进 package.json 的 version —— 这才是 electron-updater 比较的值。
+      # 只改 release tag 名无效：app 版本与 latest.yml 的 version 都源自 package.json。
+      #
+      # 注意版本号必须是合法 semver：electron-builder 的 normalizePackageData 会执行
+      # semver.valid() 校验，像 1.0.0.8 这种四段式会被直接拒绝（Invalid version）。
+      # 也不能用 1.0.0-8 预发布形式：semver 语义下预发布小于正式版，会被判为降级。
+      # 因此用 run_number 顶替 patch 段，并对已有 patch 取 max 以保证单调递增。
       - name: Compute and stamp build version
         id: version
         shell: bash
         run: |
           set -euo pipefail
-          # 读取 package.json 的基础版本，并剥离 CI 追加的构建号后缀（.N），
-          # 避免多次构建把版本号累积成 1.0.0.8.9 这种非法/不单调的形式。
           BASE="$(node -p "require('./package.json').version")"
-          CORE="$(printf '%s' "$BASE" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+)([.-].*)?$/\1/')"
+          CORE="$(printf '%s' "$BASE" | sed -E 's/^([0-9]+\.[0-9]+\.[0-9]+).*$/\1/')"
           if ! printf '%s' "$CORE" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
             echo "::error::无法从 package.json 解析出 x.y.z 版本号（原始值: $BASE）"
             exit 1
           fi
+          MAJOR="${CORE%%.*}"
+          REST="${CORE#*.}"
+          MINOR="${REST%%.*}"
+          PATCH="${REST#*.}"
           RUN="${{ github.run_number }}"
-          VERSION="${CORE}.${RUN}"
+          if [ "$RUN" -gt "$PATCH" ]; then NEWPATCH="$RUN"; else NEWPATCH="$PATCH"; fi
+          VERSION="${MAJOR}.${MINOR}.${NEWPATCH}"
+
           node -e "
             const fs = require('fs');
             const p = JSON.parse(fs.readFileSync('package.json', 'utf8'));
             p.version = process.argv[1];
             fs.writeFileSync('package.json', JSON.stringify(p, null, 2) + '\n');
           " "$VERSION"
+
+          # 自检：确保落盘的版本号能被 electron-builder 接受
+          node -e "
+            const semver = require('semver');
+            const v = require('./package.json').version;
+            if (!semver.valid(v, { loose: true })) {
+              console.error('::error::生成的版本号不是合法 semver: ' + v);
+              process.exit(1);
+            }
+            console.log('Stamped version: ' + v + ' (valid semver)');
+          "
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "Stamped version: $VERSION"
 
       - name: Install main dependencies
         run: npm ci
@@ -81,11 +99,11 @@ jobs:
           cat "$YML"
           STAMPED="${{ steps.version.outputs.VERSION }}"
           if ! grep -q "^version: ${STAMPED}$" "$YML"; then
-            echo "::error::latest.yml version does not match stamped version ${STAMPED}"
+            echo "::error::latest.yml version 与构建版本 ${STAMPED} 不一致"
             exit 1
           fi
           if ! grep -q "sha512:" "$YML"; then
-            echo "::error::latest.yml is missing sha512 (update integrity check would fail)"
+            echo "::error::latest.yml 缺少 sha512，更新完整性校验会失败"
             exit 1
           fi
           echo "OK: latest.yml version=$STAMPED with sha512"
