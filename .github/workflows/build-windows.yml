@@ -28,13 +28,24 @@ jobs:
       - name: Enable pnpm (for vendor/orb)
         run: corepack enable && corepack prepare pnpm@11.19.0 --activate
 
-      # 把构建号写进 package.json 的 version —— 这才是 electron-updater 比较的值。
-      # 只改 release tag 名无效：app 版本与 latest.yml 的 version 都源自 package.json。
+      - name: Install main dependencies
+        run: npm ci
+
+      - name: Install vendor/orb dependencies (pnpm)
+        run: |
+          cd vendor/orb
+          pnpm install --no-frozen-lockfile
+
+      # 放在依赖安装之后：下面要用仓库自带的 semver 做合法性自检，
+      # 若放在 npm ci 之前会因模块不存在而失败。
       #
-      # 注意版本号必须是合法 semver：electron-builder 的 normalizePackageData 会执行
-      # semver.valid() 校验，像 1.0.0.8 这种四段式会被直接拒绝（Invalid version）。
-      # 也不能用 1.0.0-8 预发布形式：semver 语义下预发布小于正式版，会被判为降级。
-      # 因此用 run_number 顶替 patch 段，并对已有 patch 取 max 以保证单调递增。
+      # 版本号必须是合法 semver —— electron-builder 的 normalizePackageData
+      # 会执行 semver.valid() 校验，像 1.0.0.8 这种四段式会被直接拒绝
+      # （Invalid version）。也不能用 1.0.0-8 预发布形式：semver 语义下
+      # 预发布小于正式版，会被 electron-updater 判为降级。
+      # 因此用 run_number 顶替 patch 段，并对已有 patch 取 max 保证单调递增。
+      # 这一步必须改 package.json 本体：app 版本与 latest.yml 的 version
+      # 都源自它，只改 release tag 名不会触发更新。
       - name: Compute and stamp build version
         id: version
         shell: bash
@@ -72,14 +83,6 @@ jobs:
             console.log('Stamped version: ' + v + ' (valid semver)');
           "
           echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Install main dependencies
-        run: npm ci
-
-      - name: Install vendor/orb dependencies (pnpm)
-        run: |
-          cd vendor/orb
-          pnpm install --no-frozen-lockfile
 
       - name: Build application (TypeScript + assets)
         run: npm run build
