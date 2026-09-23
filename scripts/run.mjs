@@ -77,8 +77,12 @@ switch (task) {
     node(resolve(root, "scripts/verify-mcp.mjs"));
     break;
 
+  case "verify-tools":
+    node(resolve(root, "scripts/verify-tools.mjs"));
+    break;
+
   default:
     console.log(`未知任务：${task}`);
-    console.log("可用：build | start | selftest | dist | pack | typecheck | verify-mcp");
+    console.log("可用：build | start | selftest | dist | pack | typecheck | verify-mcp | verify-tools");
     process.exit(1);
 }

@@ -138,6 +138,19 @@ export class McpClient extends EventEmitter {
           ...process.env,
           // 让子进程知道这是被 Electron 启动（避免误用 electron 的 node）
           ELECTRON_RUN_AS_NODE: "1",
+          // 阻断 puppeteer 运行时下载 Chrome。
+          //
+          // puppeteer 只是 md-to-pdf 的传递依赖，而本项目暴露给模型的 12 个工具里
+          // 没有任何浏览器/PDF 生成能力，Chrome 完全用不上。
+          // 不阻断的后果（本机实测）：子进程启动后开始下载 Chrome，
+          // stderr 按进度逐行输出，被本模块原样转发进日志 —— 单次会话产生
+          // 数万行 WARN、日志涨到近 2MB，且 logger 是同步写盘，直接拖慢主进程。
+          PUPPETEER_SKIP_DOWNLOAD: "1",
+          PUPPETEER_SKIP_CHROMIUM_DOWNLOAD: "1",
+          PUPPETEER_EXECUTABLE_PATH: "",
+          // DesktopCommander 自身的遥测关闭（减少无关网络与日志噪音）
+          DISABLE_TELEMETRY: "1",
+          DESKTOP_COMMANDER_TELEMETRY: "0",
         },
       });
     } catch (e) {
@@ -150,7 +163,11 @@ export class McpClient extends EventEmitter {
     this.proc.stdout?.on("data", (chunk: Buffer) => this.onStdout(chunk));
     this.proc.stderr?.on("data", (chunk: Buffer) => {
       const s = chunk.toString().trim();
-      if (s) logger.warn(`[MCP stderr] ${s.slice(0, 400)}`);
+      if (!s) return;
+      // Chrome 下载进度这类逐行刷屏的 stderr 直接丢弃（即便上面的环境变量没生效，
+      // 也不至于把日志冲爆）。真正有价值的报错仍然照常记录。
+      if (/Downloading Chrome|chrome-headless-shell|^\[?\d+%\]?$/i.test(s)) return;
+      logger.warn(`[MCP stderr] ${s.slice(0, 400)}`);
     });
     this.proc.on("exit", (code, signal) => {
       logger.warn(`[MCP] 子进程退出 code=${code} signal=${signal}`);
@@ -184,6 +201,14 @@ export class McpClient extends EventEmitter {
       return { ok: false, reason };
     }
 
+    // 把本应用的目录白名单真正推给 MCP 服务端。
+    //
+    // 为什么不推不行：DesktopCommander 的 allowedDirectories 默认是空数组，
+    // 而其语义是「空数组 = 整个文件系统可访问」（详见其 set_config_value 说明）。
+    // 也就是说，光在 Jarvis 面板里填白名单只挡住了安全模块自己的判断，
+    // 子进程侧依然可以读写任意路径 —— 白名单形同虚设。
+    await this.applyAllowedDirectories();
+
     // 工具发现
     try {
       const list = await this.rpc("tools/list", {});
@@ -198,6 +223,34 @@ export class McpClient extends EventEmitter {
     }
 
     return { ok: true };
+  }
+
+  /**
+   * 把应用配置里的目录白名单同步到 DesktopCommander 服务端。
+   *
+   * 注意这是**内置直调**，不走 callTool，因此不触发 set_config_value 的敏感工具确认
+   * —— 这里下发的是用户自己在设置面板里填写的白名单，不是模型提出的请求。
+   * 白名单为空时不下发（安全模块已在此之前拒绝启动 MCP）。
+   */
+  private async applyAllowedDirectories(): Promise<void> {
+    const dirs = configManager.get().allowedDirectories || [];
+    if (!dirs.length) return;
+    try {
+      const res = await this.rpc("tools/call", {
+        name: "set_config_value",
+        arguments: { key: "allowedDirectories", value: dirs },
+      });
+      if (res.error || res.result?.isError) {
+        const detail = res.error?.message || JSON.stringify(res.result).slice(0, 200);
+        logger.warn(`[MCP] 下发目录白名单失败（文件操作可能不受白名单约束）：${detail}`);
+        this.emit("unavailable", `目录白名单下发失败：${detail}`);
+        return;
+      }
+      logger.info(`[MCP] 已下发目录白名单（${dirs.length} 个）：${dirs.join(" | ")}`);
+      safetyManager.audit("mcp_allowed_dirs_applied", { count: dirs.length, dirs });
+    } catch (e) {
+      logger.warn("[MCP] 下发目录白名单异常:", (e as Error).message);
+    }
   }
 
   stop(): void {
@@ -264,14 +317,57 @@ export class McpClient extends EventEmitter {
   /* ---------------- 工具调用（含安全闸门） ---------------- */
 
   /**
+   * Windows 命令归一化，消除「同一句话有时成功有时失败」。
+   *
+   * 实测（本机真实复现）：模型为「帮我打开浏览器」生成的命令是
+   *   start_process({command:"start chrome", timeout_ms:5000})
+   * 有时带 shell:"cmd"、有时不带。DesktopCommander 在未指定 shell 时默认用
+   * powershell.exe，而 `start` 是 cmd 的内建命令、在 PowerShell 里不存在，
+   * 于是同样一句"打开浏览器"会因为模型这次有没有填 shell 而成功或失败 ——
+   * 用户体感就是「有时候能打开，有时候打不开」。
+   *
+   * 这里做确定性补正：
+   *   - 命令以 cmd 内建动词（start/echo/dir/copy/move/del/type/set 等）开头时，
+   *     强制 shell=cmd；
+   *   - 命令行里出现 "start <程序名>" 且程序名未加引号时，补成 start "" <程序名>，
+   *     避免带参数的路径被 start 当成窗口标题。
+   */
+  private normalizeWindowsArgs(toolName: string, args: Record<string, unknown>): Record<string, unknown> {
+    if (process.platform !== "win32") return args;
+    if (toolName !== "start_process" && toolName !== "interact_with_process") return args;
+    const cmd = typeof args.command === "string" ? args.command : "";
+    if (!cmd) return args;
+
+    const out: Record<string, unknown> = { ...args };
+    const first = cmd.trim().split(/\s+/)[0]?.toLowerCase() || "";
+    const CMD_BUILTINS = new Set([
+      "start", "echo", "dir", "copy", "move", "del", "erase", "type", "set",
+      "md", "mkdir", "rd", "rmdir", "cls", "ren", "rename", "cd", "chdir", "ver", "vol", "tree", "path",
+    ]);
+    if (!out.shell && CMD_BUILTINS.has(first)) {
+      out.shell = "cmd";
+      logger.info(`[MCP] 命令归一化：为 "${first} ..." 补上 shell=cmd（PowerShell 不识别该内建命令）`);
+    }
+
+    // start 后面跟未加引号的程序名时，插入空的窗口标题占位
+    if (/^start\s+(?!""\s)/i.test(String(out.command).trim())) {
+      const raw = String(out.command).trim().replace(/^start\s+/i, "");
+      out.command = `start "" ${raw}`;
+      logger.info(`[MCP] 命令归一化：start 后补空窗口标题 -> ${out.command}`);
+    }
+    return out;
+  }
+
+  /**
    * 执行一次工具调用。
-   * 流程：风险评估 -> 必要时人工确认 -> 调用 -> 审计。
+   * 流程：参数归一化 -> 风险评估 -> 必要时人工确认 -> 调用 -> 审计。
    */
   async callTool(
     toolName: string,
     args: Record<string, unknown>
   ): Promise<{ ok: boolean; output: string; rejected?: boolean }> {
     const started = Date.now();
+    args = this.normalizeWindowsArgs(toolName, args);
 
     if (!this.isReady()) {
       return { ok: false, output: "MCP 未就绪，无法执行工具。" };

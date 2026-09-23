@@ -59,6 +59,14 @@ export function initAutoUpdater(): void {
     return;
   }
 
+  // 默认关闭：本仓库 CI 会按 run_number 递增版本号并发布，本机装好 1.0.0 后
+  // 会被自动"升级"到上游 1.0.11，把本地源码修复整体覆盖，且更新过程会清空安装目录。
+  // 需要时在设置面板里显式打开 autoUpdate。
+  if (!configManager.get().autoUpdate) {
+    logger.info("[Updater] 自动更新已关闭（config.autoUpdate=false），跳过启动检查");
+    return;
+  }
+
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.logger = logger as unknown as (typeof autoUpdater)["logger"];

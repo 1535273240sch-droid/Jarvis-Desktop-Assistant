@@ -65,12 +65,37 @@ const panelApi = {
   respondConfirm: (res: unknown) => send("tool:confirm-response", res),
   onToolList: (cb: Listener) => on("tool:list", cb),
 
+  // 全局急停
+  emergencyStopStatus: () => invoke("emergency-stop:status"),
+  emergencyStopReset: () => invoke("emergency-stop:reset"),
+
   // 视觉
   visionCapture: (payload: unknown) => invoke("vision:capture", payload),
 
   // 配置
   getConfig: () => invoke("config:get"),
   setConfig: (patch: unknown) => invoke("config:set", patch),
+
+  // 长期记忆
+  memoryGet: () => invoke("memory:get"),
+  memoryAdd: (text: string) => invoke("memory:add", text),
+  memoryRemove: (text: string) => invoke("memory:remove", text),
+  memoryClear: () => invoke("memory:clear"),
+
+  // 诊断日志
+  diagErrors: () => invoke("diag:errors"),
+  diagClearErrors: () => invoke("diag:clear-errors"),
+  diagOpenDir: () => invoke("diag:open-dir"),
+
+  // 音色
+  voiceList: () => invoke("voice:list"),
+  voiceValidate: (voice: string) => invoke("voice:validate", voice),
+
+  // 外部 MCP
+  mcpExtStatus: () => invoke("mcp-ext:status"),
+  mcpExtReload: (servers: unknown) => invoke("mcp-ext:reload", servers),
+  mcpExtTest: (cfg: unknown) => invoke("mcp-ext:test", cfg),
+  mcpExtPresets: () => invoke("mcp-ext:presets"),
 
   // 其他
   togglePanel: () => invoke("window:toggle-panel"),

@@ -4,6 +4,7 @@ import { logger } from "./logger";
 import { configManager } from "./config";
 import { sessionStore } from "./session-store";
 import { memoryStore } from "./memory";
+import { appCatalog } from "./app-catalog";
 import type { SessionStatus } from "../common/types";
 
 /**
@@ -25,11 +26,20 @@ import type { SessionStatus } from "../common/types";
 export interface RealtimeEvents {
   audioDelta: (base64Pcm: string) => void;
   userTranscript: (text: string) => void;
+  /** 用户语音的增量转写（实时字幕），done 表示该句已定稿 */
+  userTranscriptDelta: (delta: string, done: boolean) => void;
   assistantText: (delta: string, done: boolean) => void;
   assistantTranscript: (delta: string, done: boolean) => void;
   thinking: (delta: string, done: boolean) => void;
   speechStarted: () => void;
   speechStopped: () => void;
+  /**
+   * 服务端检测到用户开始说话并已打断上一轮响应。
+   * 本端点是 StepFun 实现：它**不发送** OpenAI 的 input_audio_buffer.speech_started，
+   * 而是发送 input_audio_buffer.speech_interrupted 并附上已经转写出的文字。
+   * 本地必须据此立即清空播放缓冲，否则 AI 会把自己那段话播完才轮到用户指令。
+   */
+  bargeIn: (partialTranscript: string) => void;
   responseCreated: () => void;
   responseDone: () => void;
   toolCall: (callId: string, name: string, argsJson: string) => void;
@@ -61,6 +71,8 @@ export class RealtimeClient extends EventEmitter {
   /** 本轮响应内待处理的工具调用累积（function_call 的 arguments 是流式拼接的） */
   private pendingToolCalls = new Map<string, { name: string; argsBuffer: string; itemId: string }>();
   private assistantMsgId: string | null = null;
+  /** 用户这一句话的增量转写（用于实时字幕与打断判断） */
+  private userTranscriptBuffer = "";
 
   isConnected(): boolean {
     return this.ws !== null && this.ws.readyState === WebSocket.OPEN;
@@ -184,18 +196,42 @@ export class RealtimeClient extends EventEmitter {
   /* ---------------- 会话配置 ---------------- */
 
   /**
-   * 组装发给服务端的 instructions：用户配置 + 跨会话记忆。
-   * 记忆为空时返回原文，避免无谓污染提示词。
+   * 组装发给服务端的 instructions：用户配置 + 本机环境事实 + 跨会话记忆。
+   * 记忆/环境为空时跳过对应段落，避免无谓污染提示词。
    */
   private composeInstructions(): string {
     const base = configManager.get().instructions;
-    let block = "";
+    const parts = [base];
+
+    // 本机实际可用的程序清单：不注入的话模型只能靠猜，
+    // 实测会出现「打开浏览器」时执行 explorer.exe 或去单击桌面图标。
     try {
-      block = memoryStore.buildPromptBlock();
+      const env = this.envPromptCache;
+      if (env) parts.push(env);
+    } catch (e) {
+      logger.warn("[Realtime] 读取本机程序清单失败:", e);
+    }
+
+    try {
+      const block = memoryStore.buildPromptBlock();
+      if (block) parts.push(block);
     } catch (e) {
       logger.warn("[Realtime] 读取长期记忆失败:", e);
     }
-    return block ? `${base}\n\n${block}` : base;
+    return parts.filter(Boolean).join("\n\n");
+  }
+
+  /** 本机程序清单缓存（扫描较慢，会话内复用） */
+  private envPromptCache = "";
+
+  /** 刷新本机程序清单（由 orchestrator 在建立会话前调用） */
+  async refreshEnvPrompt(): Promise<void> {
+    try {
+      this.envPromptCache = await appCatalog.buildPromptSection();
+      if (this.envPromptCache) logger.info("[Realtime] 已注入本机程序清单到提示词");
+    } catch (e) {
+      logger.warn("[Realtime] 生成本机程序清单失败:", (e as Error).message);
+    }
   }
 
   /**
@@ -377,12 +413,26 @@ export class RealtimeClient extends EventEmitter {
 
   /* ---------------- 服务端事件 ---------------- */
 
+  /** 未处理事件类型的去重记录（每种类型只写一次日志，避免刷屏与同步写盘阻塞） */
+  private loggedEventTypes = new Set<string>();
+
+  private logUnknownEventOnce(type: string): void {
+    if (this.loggedEventTypes.has(type)) return;
+    this.loggedEventTypes.add(type);
+    logger.info(`[Realtime] 事件: ${type}（同类后续事件不再逐条记录）`);
+  }
+
   private handleServerEvent(evt: any): void {
     switch (evt.type) {
       case "session.created":
         logger.info(`[Realtime] session.created`);
         this.sessionStartAt = Date.now();
         this.producedAudio = false;
+        // 新会话没有任何进行中的响应，必须复位。否则若重建发生在某轮响应途中
+        // （responseActive 仍为 true），此后每次 requestResponse 都会被当成"已有响应"
+        // 而挂起等待一个永不到来的 response.done，表现为重建后助手彻底不再回应。
+        this.responseActive = false;
+        this.pendingResponseRequest = false;
         this.sendSessionUpdate();
         // 重建场景：回注上下文（connect 前注册的监听会在这里触发）
         this.emit("sessionCreated");
@@ -400,6 +450,53 @@ export class RealtimeClient extends EventEmitter {
 
       case "input_audio_buffer.speech_stopped":
         this.emit("speechStopped");
+        break;
+
+      /**
+       * StepFun 端点的打断事件（本项目的实际打断触发点）。
+       *
+       * 本端点不发 OpenAI 的 speech_started，只发这个 event；收到它说明服务端
+       * 已经检测到用户开口并中止了上一轮响应，但**本地播放队列还在继续出声**。
+       * 必须立刻把这件事告诉上层（清空播放缓冲 + 收敛状态），
+       * 否则表现为「AI 非要把自己那段话说完，我说话它没反应」。
+       *
+       * 事件里可能带已转写文字（不同版本字段名不同，逐个兜底取）。
+       */
+      case "input_audio_buffer.speech_interrupted":
+      case "input_audio_buffer.speech_started_interrupted": {
+        const partial = String(evt.transcript || evt.text || evt.delta || this.userTranscriptBuffer || "");
+        logger.info(`[Realtime] 检测到用户打断（speech_interrupted），已转写片段="${partial.slice(0, 60)}"`);
+        this.emit("bargeIn", partial);
+        break;
+      }
+
+      /** 用户语音的增量转写：既用于实时字幕，也用于「用户是否已开口」的判断 */
+      case "conversation.item.input_audio_transcription.delta": {
+        const d = String(evt.delta || "");
+        if (d) {
+          this.userTranscriptBuffer += d;
+          this.emit("userTranscriptDelta", d, false);
+        }
+        break;
+      }
+
+      case "conversation.item.input_audio_transcription.completed": {
+        const t = String(evt.transcript || this.userTranscriptBuffer || "").trim();
+        this.userTranscriptBuffer = "";
+        if (t) {
+          sessionStore.addMessage({ role: "user", content: t });
+          sessionStore.addContext("user", t);
+          this.emit("userTranscriptDelta", t, true);
+          this.emit("userTranscript", t);
+        } else {
+          this.emit("userTranscriptDelta", "", true);
+        }
+        break;
+      }
+
+      case "conversation.item.input_audio_transcription.failed":
+        logger.warn(`[Realtime] 用户语音转写失败: ${JSON.stringify(evt.error || {})}`);
+        this.emit("userTranscriptDelta", "", true);
         break;
 
       case "response.created":
@@ -452,14 +549,6 @@ export class RealtimeClient extends EventEmitter {
 
       case "response.thinking.done":
         this.emit("thinking", evt.thinking || "", true);
-        break;
-
-      case "conversation.item.input_audio_transcription.completed":
-        if (evt.transcript) {
-          sessionStore.addMessage({ role: "user", content: evt.transcript });
-          sessionStore.addContext("user", evt.transcript);
-          this.emit("userTranscript", evt.transcript);
-        }
         break;
 
       /* —— 工具调用（流式参数拼接）—— */
@@ -551,8 +640,14 @@ export class RealtimeClient extends EventEmitter {
       }
 
       default:
-        // 其余事件（如 response.content_part.*）不影响主流程，仅记录
-        logger.info(`[Realtime] 事件: ${evt.type}`);
+        // 其余事件（如 response.content_part.*）不影响主流程。
+        //
+        // 这里**必须限流**：服务端在一次对话里会发大量同类事件
+        // （实测仅 input_audio_transcription.delta 就有 134 条），
+        // 而 logger 是每条同步写盘。逐条记录会让日志文件迅速膨胀
+        // （本机实测单文件涨到近 2MB、WARN 逾 1.5 万条），
+        // 并在高频事件下阻塞主进程。改为「每个事件类型每种状态只记一次」。
+        this.logUnknownEventOnce(evt.type);
         break;
     }
   }
@@ -675,6 +770,134 @@ export class RealtimeClient extends EventEmitter {
   /** 强制广播一次当前状态（配置变更后调用） */
   refreshStatus(): void {
     this.emitStatus(this.isConnected() ? "connected" : "disconnected");
+  }
+
+  /**
+   * 音色列表（供面板「一键获取音色」使用）。
+   *
+   * 本端点的 /v1/audio/voices 只返回**自定义/克隆音色**（本机实测为空数组），
+   * 内置音色不在接口里。因此策略是：
+   *   1. 先调接口拿自定义音色；
+   *   2. 再合并一份**逐项实测被服务端接受**的内置音色清单。
+   * 这样用户看到的是「确实可用」的完整列表，而不是靠猜。
+   */
+  async listVoices(): Promise<{
+    builtin: Array<{ id: string; label: string; verified: boolean }>;
+    custom: Array<{ id: string; label: string }>;
+    error?: string;
+  }> {
+    // 内置音色：这批已在本机用真实 Key 逐个建会话验证过会被接受
+    const VERIFIED: Array<{ id: string; label: string }> = [
+      { id: "cixingnansheng", label: "磁性男声" },
+      { id: "zhengpaiqingnian", label: "正派青年" },
+      { id: "wenrounvsheng", label: "温柔女声" },
+      { id: "wenrounansheng", label: "温柔男声" },
+      { id: "qinqienvsheng", label: "亲切女声" },
+      { id: "qingniandaxuesheng", label: "青年大学生" },
+      { id: "shenchennanyin", label: "深沉男音" },
+      { id: "jilingshaonv", label: "机灵少女" },
+      { id: "yuanqinansheng", label: "元气男声" },
+      { id: "wenjingxuejie", label: "文静学姐" },
+    ];
+
+    const out = {
+      builtin: VERIFIED.map((v) => ({ ...v, verified: true })),
+      custom: [] as Array<{ id: string; label: string }>,
+      error: undefined as string | undefined,
+    };
+
+    // 再尝试拉取自定义音色（失败不影响内置清单）
+    const cfg = configManager.get();
+    if (!cfg.apiKey) {
+      out.error = "未配置 API Key，仅显示内置音色";
+      return out;
+    }
+    const base = cfg.realtimeBaseUrl.replace(/^wss:/, "https:").replace(/^ws:/, "http:").replace(/\/realtime\/?$/, "");
+    const endpoints = [`${base}/audio/voices`, `${base}/voices`];
+    for (const url of endpoints) {
+      try {
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), 10000);
+        const res = await fetch(url, { headers: { Authorization: `Bearer ${cfg.apiKey}` }, signal: ctrl.signal });
+        clearTimeout(timer);
+        if (!res.ok) continue;
+        const j: any = await res.json();
+        const arr: any[] = Array.isArray(j?.data) ? j.data : Array.isArray(j) ? j : [];
+        out.custom = arr
+          .map((x) => {
+            const id = String(x?.id ?? x?.voice ?? x?.voice_id ?? "");
+            const label = String(x?.name ?? x?.label ?? id);
+            return id ? { id, label } : null;
+          })
+          .filter(Boolean) as Array<{ id: string; label: string }>;
+        logger.info(`[Realtime] 音色列表：内置 ${out.builtin.length} 个，自定义 ${out.custom.length} 个`);
+        return out;
+      } catch (e) {
+        out.error = `拉取自定义音色失败：${(e as Error).message}`;
+      }
+    }
+    return out;
+  }
+
+  /** 校验某个音色是否被服务端接受（供自定义音色「测一下」） */
+  async validateVoice(voice: string): Promise<{ ok: boolean; reason?: string }> {
+    const cfg = configManager.get();
+    if (!cfg.apiKey) return { ok: false, reason: "未配置 API Key" };
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (r: { ok: boolean; reason?: string }) => {
+        if (settled) return;
+        settled = true;
+        try {
+          ws.close();
+        } catch {
+          /* ignore */
+        }
+        resolve(r);
+      };
+      let ws: WebSocket;
+      try {
+        ws = new WebSocket(`${cfg.realtimeBaseUrl}?model=${encodeURIComponent(cfg.realtimeModel)}`, {
+          headers: { Authorization: `Bearer ${cfg.apiKey}` },
+        });
+      } catch (e) {
+        resolve({ ok: false, reason: (e as Error).message });
+        return;
+      }
+      const timer = setTimeout(() => finish({ ok: false, reason: "校验超时" }), 12000);
+      ws.on("message", (raw: WebSocket.RawData) => {
+        let e: any;
+        try {
+          e = JSON.parse(raw.toString());
+        } catch {
+          return;
+        }
+        if (e.type === "session.created") {
+          ws.send(
+            JSON.stringify({
+              type: "session.update",
+              session: {
+                modalities: ["text", "audio"],
+                instructions: "hi",
+                voice,
+                input_audio_format: "pcm16",
+                output_audio_format: "pcm16",
+              },
+            })
+          );
+        } else if (e.type === "session.updated") {
+          clearTimeout(timer);
+          finish({ ok: true });
+        } else if (e.type === "error") {
+          clearTimeout(timer);
+          finish({ ok: false, reason: String(e.error?.message || "服务端拒绝该音色").slice(0, 160) });
+        }
+      });
+      ws.on("error", (err: Error) => {
+        clearTimeout(timer);
+        finish({ ok: false, reason: err.message });
+      });
+    });
   }
 
   dispose(): void {

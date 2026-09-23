@@ -87,6 +87,11 @@ jobs:
       - name: Build application (TypeScript + assets)
         run: npm run build
 
+      # 工具执行闭环回归测试：验证「打开软件/打开网址/输入提交/MCP 调用与白名单」这些
+      # 用户实际抱怨过的链路确实能跑通。失败即阻断发布，避免带着坏功能出台。
+      - name: Verify tool execution end-to-end
+        run: node scripts/run.mjs verify-tools
+
       - name: Package Windows installer (NSIS) + update metadata
         run: npm run dist -- --publish never
 

@@ -9,6 +9,10 @@ import { mcpClient } from "./mcp";
 import { visionManager } from "./vision";
 import { sessionStore } from "./session-store";
 import { stateMachine } from "./state";
+import { memoryStore } from "./memory";
+import { externalMcp } from "./mcp-external";
+import { MCP_PRESETS } from "./mcp-presets";
+import { isStopped, reset as resetEmergencyStop } from "./emergency-stop";
 import { IPC } from "../common/types";
 import type { JarvisConfig } from "../common/types";
 
@@ -228,6 +232,102 @@ export function registerIpcHandlers(deps: Deps): void {
   ipcMain.handle(IPC.TOOL_LIST, async () => ({
     tools: mcpClient.getTools().map((t) => t.name),
   }));
+
+  /* ---------------- 全局急停 ---------------- */
+
+  ipcMain.handle(IPC.EMERGENCY_STOP_STATUS, async () => ({ stopped: isStopped() }));
+
+  // 急停是「一次性闩锁」：触发后所有桌面操作都会抛 EMERGENCY_STOP，
+  // 若没有这条恢复通路，用户只能重启应用才能重新使用鼠标键盘控制。
+  ipcMain.handle(IPC.EMERGENCY_STOP_RESET, async () => {
+    resetEmergencyStop();
+    safetyManager.audit("emergency_stop_reset", {});
+    logger.info("[IPC] 用户已解除全局急停，桌面控制恢复可用");
+    const p = deps.getPanelWindow();
+    if (p && !p.isDestroyed()) {
+      p.webContents.send(IPC.CHAT_MESSAGE, { systemNotice: "全局急停已解除，桌面控制恢复可用。" });
+    }
+    return { ok: true, stopped: isStopped() };
+  });
+
+  /* ---------------- 长期记忆 ---------------- */
+
+  ipcMain.handle(IPC.MEMORY_GET, async () => ({
+    facts: memoryStore.getFacts(),
+    turns: memoryStore.getTurns(20),
+    path: memoryStore.getPath(),
+  }));
+
+  ipcMain.handle(IPC.MEMORY_ADD, async (_e, text: string) => {
+    const t = String(text || "").trim();
+    if (!t) return { ok: false, reason: "内容为空" };
+    const added = memoryStore.addFact(t);
+    safetyManager.audit("memory_write", { fact: t, via: "panel" });
+    return { ok: true, added };
+  });
+
+  ipcMain.handle(IPC.MEMORY_REMOVE, async (_e, text: string) => {
+    const removed = memoryStore.removeFact(String(text || ""));
+    safetyManager.audit("memory_remove", { fact: String(text || "").slice(0, 200), removed });
+    return { ok: true, removed };
+  });
+
+  ipcMain.handle(IPC.MEMORY_CLEAR, async () => {
+    memoryStore.clear();
+    safetyManager.audit("memory_clear", {});
+    return { ok: true };
+  });
+
+  /* ---------------- 诊断：分类错误日志 ---------------- */
+
+  ipcMain.handle(IPC.DIAG_ERRORS, async () => ({
+    summary: logger.summarizeErrors(300),
+    recent: logger.recentErrors(60),
+    errorPath: logger.getErrorPath(),
+    logDir: logger.getLogDir(),
+    logPath: logger.getLogPath(),
+  }));
+
+  ipcMain.handle(IPC.DIAG_CLEAR_ERRORS, async () => {
+    logger.clearErrors();
+    return { ok: true };
+  });
+
+  ipcMain.handle(IPC.DIAG_OPEN_DIR, async () => {
+    shell.openPath(logger.getLogDir());
+    return { ok: true, dir: logger.getLogDir() };
+  });
+
+  /* ---------------- 音色 ---------------- */
+
+  ipcMain.handle(IPC.VOICE_LIST, async () => realtimeClient.listVoices());
+  ipcMain.handle(IPC.VOICE_VALIDATE, async (_e, voice: string) => realtimeClient.validateVoice(String(voice || "")));
+
+  /* ---------------- 外部 MCP ---------------- */
+
+  ipcMain.handle(IPC.MCP_EXT_STATUS, async () => ({
+    servers: externalMcp.status(),
+    configured: configManager.get().mcpServers || [],
+    tools: externalMcp.toModelTools().map((t: any) => t.function.name),
+  }));
+
+  ipcMain.handle(IPC.MCP_EXT_LIST_PRESETS, async () => MCP_PRESETS);
+
+  // 保存外部 MCP 配置并立即重连（用户不必重启应用）
+  ipcMain.handle(IPC.MCP_EXT_RELOAD, async (_e, servers) => {
+    configManager.set({ mcpServers: Array.isArray(servers) ? servers : [] });
+    safetyManager.audit("mcp_ext_reload", { count: Array.isArray(servers) ? servers.length : 0 });
+    const r = await externalMcp.startAll();
+    // 重连后把新工具集下发给模型
+    orchestrator.pushToolsNow();
+    return { ok: true, ...r, status: externalMcp.status() };
+  });
+
+  // 试运行一个服务器配置（不落盘），验证能否握手并列出工具
+  ipcMain.handle(IPC.MCP_EXT_TEST, async (_e, cfg) => {
+    if (!cfg || !cfg.command) return { ok: false, reason: "缺少 command" };
+    return externalMcp.testConfig(cfg);
+  });
 
   logger.info("[IPC] 全部通道已注册");
 }

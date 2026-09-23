@@ -1,9 +1,13 @@
 import { BrowserWindow } from "electron";
+import { execFile } from "node:child_process";
+import * as path from "node:path";
 import { logger } from "./logger";
+import { appCatalog } from "./app-catalog";
 import { stateMachine } from "./state";
 import { sessionStore } from "./session-store";
 import { realtimeClient } from "./realtime";
 import { mcpClient } from "./mcp";
+import { externalMcp } from "./mcp-external";
 import { visionManager } from "./vision";
 import { desktopController } from "./desktop-control";
 import { safetyManager } from "./safety";
@@ -33,6 +37,56 @@ import type { AssistantState, SessionStatus, ToolCallView } from "../common/type
 
 /** 内置工具（不属于 MCP，由本项目主进程直接提供） */
 const BUILTIN_TOOLS = [
+  {
+    type: "function",
+    function: {
+      name: "open_app",
+      description:
+        "打开本机已安装的软件（浏览器、计算器、记事本、微信等）。用户说「打开浏览器」「帮我开个计算器」「启动微信」时**必须**用这个工具，不要用点击桌面图标的方式。内部会按名称模糊匹配本机实际安装的程序并可靠启动。",
+      parameters: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description: "软件名称，用用户说的原词即可，例如「浏览器」「Edge」「计算器」「记事本」「微信」「资源管理器」",
+          },
+          args: { type: "string", description: "可选的启动参数，例如要打开的网址" },
+        },
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_url",
+      description:
+        "在浏览器中打开指定网址。用户说「打开某某网站」「在浏览器里打开…」「搜索…」时用这个工具。会自动找到本机可用的浏览器并把网址传给它。若用户只是要搜索关键词，请把关键词拼成搜索链接（如 https://www.bing.com/search?q=关键词）。",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "要打开的完整网址，必须以 http:// 或 https:// 开头" },
+        },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "search_web",
+      description:
+        "在浏览器中搜索关键词。用户说「帮我搜一下…」「搜索…」「查一下…（要上网页查的）」时用这个工具。会打开浏览器并显示搜索结果页。",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "搜索关键词" },
+          engine: { type: "string", enum: ["bing", "baidu", "google"], description: "搜索引擎，默认 bing" },
+        },
+        required: ["query"],
+      },
+    },
+  },
   {
     type: "function",
     function: {
@@ -70,10 +124,17 @@ const BUILTIN_TOOLS = [
     type: "function",
     function: {
       name: "type_text",
-      description: "向当前前台窗口输入文字。当用户说「帮我输入…」「打字…」时调用。密码/验证码类内容会被拒绝代填。",
+      description:
+        "向当前前台窗口输入文字。当用户说「帮我输入…」「打字…」「在这里输入…然后回车」时调用。若用户要求输入后发送/提交/搜索，把 submit 设为 true（会额外按一次回车）。密码/验证码类内容会被拒绝代填。",
       parameters: {
         type: "object",
-        properties: { text: { type: "string", description: "要输入的文本" } },
+        properties: {
+          text: { type: "string", description: "要输入的文本" },
+          submit: {
+            type: "boolean",
+            description: "输入后是否按回车提交（用户说「然后回车」「并搜索」「发送」时为 true）",
+          },
+        },
         required: ["text"],
       },
     },
@@ -235,6 +296,34 @@ class Orchestrator {
       }
     });
 
+    /**
+     * 用户打断（本项目的关键修复点）。
+     *
+     * StepFun 端点不发 OpenAI 的 input_audio_buffer.speech_started，而是发
+     * speech_interrupted。此前只监听前者，导致此处从未被触发 —— 服务端虽然
+     * 已经停掉了生成，但渲染进程的播放队列还在把已排入的音频播完，
+     * 用户体感就是「它非要把话说完才执行我的命令」。
+     *
+     * 现在收到该事件即刻走 interrupt()：先本地静音，再取消服务端响应。
+     */
+    realtimeClient.on("bargeIn", (partial: string) => {
+      const heard = String(partial || "").trim();
+      const cur = stateMachine.getState();
+      logger.info(`[Orchestrator] 用户打断开始（当前态=${cur}）${heard ? `，已识别："${heard}"` : ""}`);
+      // 只有在"正在说/正在想"时才有东西需要打断；已经在聆听就只更新字幕
+      if (cur === "speaking" || cur === "thinking" || cur === "executing") {
+        this.interrupt("检测到用户开口（barge-in）");
+      }
+      if (heard) {
+        this.broadcast(IPC.CHAT_MESSAGE, { userTranscriptPartial: heard });
+      }
+    });
+
+    /** 用户语音实时字幕：转写增量直接推到面板（含打断时未完句的片段） */
+    realtimeClient.on("userTranscriptDelta", (delta: string, done: boolean) => {
+      this.broadcast(IPC.CHAT_MESSAGE, { userTranscriptDelta: delta, userTranscriptDone: done });
+    });
+
     realtimeClient.on("responseCreated", () => {
       stateMachine.transition("thinking", "模型响应已创建");
       this.broadcast(IPC.CHAT_MESSAGE, { reset: true });
@@ -279,7 +368,10 @@ class Orchestrator {
 
     realtimeClient.on("toolCall", (callId: string, name: string, argsJson: string) => {
       this.handleToolCall(callId, name, argsJson).catch((e) => {
-        logger.error("[Orchestrator] 工具调用处理失败:", e);
+        logger.errorCategorized("tool_execution", "Orchestrator", `工具调用处理失败：${name}：${(e as Error).message}`, {
+          tool: name,
+          context: { callId, argsJson: String(argsJson).slice(0, 500) },
+        });
         realtimeClient.sendToolResult(callId, `工具执行失败：${(e as Error).message}`);
         stateMachine.transition("thinking", "工具异常，回到思考态");
       });
@@ -307,6 +399,11 @@ class Orchestrator {
     mcpClient.on("tools", () => {
       this.pushToolsToModel();
     });
+
+    // 外部 MCP：就绪后把工具一起补发
+    externalMcp.on("tools", () => {
+      this.pushToolsToModel();
+    });
   }
 
   /** 启动会话（无 Key 时给出明确提示而非静默失败） */
@@ -328,6 +425,9 @@ class Orchestrator {
       this.pushToolsToModel();
     });
 
+    // 会话建立前刷新本机程序清单，供 instructions 注入
+    realtimeClient.refreshEnvPrompt().catch((e) => logger.warn("[Orchestrator] 刷新本机程序清单失败:", e));
+
     realtimeClient.connect();
     this.started = true;
 
@@ -341,8 +441,21 @@ class Orchestrator {
         .start()
         .then((r) => {
           if (!r.ok) logger.warn(`[Orchestrator] MCP 后台启动未成功：${r.reason}`);
+          // 外部 MCP 与内置 MCP 并行启动，互不阻塞
+          return externalMcp.startAll();
+        })
+        .then((r) => {
+          if (r && (r.started || r.failed)) {
+            logger.info(`[Orchestrator] 外部 MCP：成功 ${r.started}，失败 ${r.failed}`);
+          }
         })
         .catch((e) => logger.error("[Orchestrator] MCP 后台启动异常:", e));
+    } else {
+      // 内置 MCP 已就绪时也要把外部 MCP 拉起来
+      externalMcp
+        .startAll()
+        .then((r) => logger.info(`[Orchestrator] 外部 MCP 启动：成功 ${r.started}，失败 ${r.failed}`))
+        .catch((e) => logger.error("[Orchestrator] 外部 MCP 启动异常:", e));
     }
 
     return { ok: true };
@@ -379,12 +492,17 @@ class Orchestrator {
     return this.started;
   }
 
-  /** 把内置工具 + MCP 工具一起下发给模型 */
+  /** 把内置工具 + MCP 工具 + 外部 MCP 工具一起下发给模型 */
   private pushToolsToModel(): void {
-    const tools = [...BUILTIN_TOOLS, ...mcpClient.toModelTools()];
+    const tools = [...BUILTIN_TOOLS, ...mcpClient.toModelTools(), ...externalMcp.toModelTools()];
     realtimeClient.updateTools(tools);
     this.broadcast(IPC.TOOL_LIST, { tools: tools.map((t: any) => t.function.name) });
-    logger.info(`[Orchestrator] 已下发工具集：${tools.map((t: any) => t.function.name).join(", ")}`);
+    logger.info(`[Orchestrator] 已下发工具集（共 ${tools.length}）：${tools.map((t: any) => t.function.name).join(", ")}`);
+  }
+
+  /** 供外部（如配置变更后）立即重新下发工具集 */
+  pushToolsNow(): void {
+    this.pushToolsToModel();
   }
 
   /* ---------------- 工具执行闭环 ---------------- */
@@ -415,8 +533,14 @@ class Orchestrator {
       if (builtin !== null) {
         ok = builtin.ok;
         output = builtin.output;
+      } else if (externalMcp.owns(name)) {
+        // 再交给外部 MCP（用户自己配置的服务器）
+        const r = await externalMcp.callTool(name, args);
+        ok = r.ok;
+        output = r.output;
+        if (r.rejected) view.status = "rejected";
       } else {
-        // 再交给 MCP
+        // 最后交给内置 DesktopCommander
         const r = await mcpClient.callTool(name, args);
         ok = r.ok;
         output = r.output;
@@ -427,7 +551,19 @@ class Orchestrator {
       ok = false;
       output = `工具执行异常：${(e as Error).message}`;
       view.status = "failed";
-      logger.error(`[Orchestrator] 工具 ${name} 异常:`, e);
+      logger.errorCategorized("tool_execution", "Orchestrator", `工具 ${name} 执行异常：${(e as Error).message}`, {
+        tool: name,
+        context: { args: JSON.stringify(args).slice(0, 500) },
+      });
+    }
+
+    // 工具失败时也归类记录：这是"指令没做到"最直接的证据来源
+    if (!ok && view.status !== "rejected") {
+      logger.errorCategorized("tool_execution", "Orchestrator", `工具 ${name} 未成功：${output.slice(0, 300)}`, {
+        tool: name,
+        handled: true,
+        context: { args: JSON.stringify(args).slice(0, 400), durationMs: Date.now() - started },
+      });
     }
 
     view.result = output.slice(0, 2000);
@@ -448,6 +584,87 @@ class Orchestrator {
     args: Record<string, unknown>
   ): Promise<{ ok: boolean; output: string } | null> {
     switch (name) {
+      case "open_app": {
+        const q = String(args.name || "").trim();
+        if (!q) return { ok: false, output: "没有指定要打开的软件名。" };
+        const extraArgs = typeof args.args === "string" ? args.args.trim() : "";
+
+        const candidates = await appCatalog.resolve(q);
+        if (!candidates.length) {
+          // 列出本机可用的程序，帮助模型换一个说法重试（而不是去点图标）
+          const all = await appCatalog.scan();
+          const sample = all.slice(0, 25).map((a) => a.name).join("、");
+          safetyManager.audit("open_app_not_found", { query: q });
+          return {
+            ok: false,
+            output: `本机没有找到匹配「${q}」的程序。可用的程序有：${sample}。请从中选择一个重试，或如实告知用户未安装。`,
+          };
+        }
+
+        const pick = candidates[0];
+        stateMachine.transition("executing", `正在启动 ${pick.name}`);
+        const launched = await this.launchApp(pick, extraArgs);
+        safetyManager.audit("open_app", {
+          query: q,
+          resolvedId: pick.id,
+          name: pick.name,
+          kind: pick.kind,
+          ok: launched.ok,
+        });
+
+        if (!launched.ok) {
+          // 首选失败时自动尝试下一个候选（例如 exe 路径失效但快捷方式可用）
+          for (const alt of candidates.slice(1, 3)) {
+            const r2 = await this.launchApp(alt, extraArgs);
+            if (r2.ok) {
+              return { ok: true, output: `已启动「${alt.name}」。请简短告知用户，不要复述本说明。` };
+            }
+          }
+          return {
+            ok: false,
+            output: `启动「${pick.name}」失败：${launched.error || "未知原因"}。请如实告知用户，不要声称已打开。`,
+          };
+        }
+
+        // 启动后确认进程是否真的起来了（避免"说了已打开其实没有"）
+        await new Promise((r) => setTimeout(r, 1200));
+        const verified = await this.verifyAppRunning(pick);
+        return {
+          ok: true,
+          output: verified
+            ? `已成功启动「${pick.name}」并确认进程在运行。请用一句话简短确认，不要重复说明过程。`
+            : `已发出启动「${pick.name}」的请求，但暂未检测到对应进程。可能仍在启动中；如用户反馈没打开，请改用其他方式或如实说明。`,
+        };
+      }
+
+      case "open_url": {
+        const urlStr = String(args.url || "").trim();
+        if (!urlStr) return { ok: false, output: "请提供要打开的网址。" };
+        let parsed: URL;
+        try {
+          parsed = new URL(urlStr);
+        } catch {
+          return { ok: false, output: "网址格式不正确，需要以 http:// 或 https:// 开头。" };
+        }
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+          return { ok: false, output: "只支持 http/https 链接。" };
+        }
+        return this.launchInBrowser(parsed.toString(), "打开网页");
+      }
+
+      case "search_web": {
+        const q = String(args.query || "").trim();
+        if (!q) return { ok: false, output: "请提供要搜索的关键词。" };
+        const engine = String(args.engine || "bing").toLowerCase();
+        const base =
+          engine === "baidu"
+            ? "https://www.baidu.com/s?wd="
+            : engine === "google"
+              ? "https://www.google.com/search?q="
+              : "https://www.bing.com/search?q=";
+        return this.launchInBrowser(base + encodeURIComponent(q), `搜索「${q}」`);
+      }
+
       case "look_at_screen": {
         const question = String(args.question || "屏幕上显示了什么？");
         const target = (args.target as "entire_screen" | "active_window") || "active_window";
@@ -494,8 +711,19 @@ class Orchestrator {
       case "type_text": {
         const text = String(args.text || "");
         if (!text) return { ok: false, output: "没有要输入的文本。" };
+        const submit = args.submit === true;
         const msg = await desktopController.typeText(text);
-        return { ok: !msg.includes("拒绝"), output: msg };
+        if (msg.includes("拒绝")) return { ok: false, output: msg };
+        // 用户要求「输入后搜索/发送」时必须真的按回车，否则输入留在框里没生效 ——
+        // 这正是实测中「让它输入文字并搜索，结果没反应」的原因。
+        if (submit) {
+          const keyMsg = await desktopController.pressKeys("enter");
+          return {
+            ok: !keyMsg.includes("拒绝"),
+            output: `${msg}；已按回车提交。请用一句话简短确认结果，不要复述过程。`,
+          };
+        }
+        return { ok: true, output: msg };
       }
 
       case "press_keys": {
@@ -682,6 +910,140 @@ class Orchestrator {
       default:
         return null;
     }
+  }
+
+  /* ---------------- 应用启动 ---------------- */
+
+  /**
+   * 启动一个已发现的应用。
+   *
+   * 三种方式按可靠性排序（实测本机 Edge 只有快捷方式可用）：
+   *   exe  -> 直接 Start-Process 全路径
+   *   lnk  -> Start-Process 快捷方式（Edge 在这台机器上唯一可行的方式）
+   *   path -> cmd start（依赖 PATH）
+   */
+  private async launchApp(
+    app: { name: string; launchPath: string; kind: "exe" | "lnk" | "path" },
+    extraArgs = ""
+  ): Promise<{ ok: boolean; error?: string }> {
+    const esc = (s: string) => String(s).replace(/'/g, "''");
+    let script: string;
+
+    if (app.kind === "path") {
+      // 只是 PATH 里的名字，交给 cmd 的 start（本机 start 归一化会保证 shell=cmd）
+      script = `Start-Process -FilePath '${esc(app.launchPath)}'${extraArgs ? ` -ArgumentList '${esc(extraArgs)}'` : ""} -ErrorAction Stop; 'ok'`;
+    } else {
+      script =
+        `$p = Start-Process -FilePath '${esc(app.launchPath)}'` +
+        (extraArgs ? ` -ArgumentList '${esc(extraArgs)}'` : "") +
+        ` -PassThru -ErrorAction Stop; if ($p) { 'ok pid=' + $p.Id } else { 'ok' }`;
+    }
+
+    try {
+      const out = await this.ps(script, 20000);
+      if (/ok/.test(out)) return { ok: true };
+      return { ok: false, error: out.slice(0, 200) || "无输出" };
+    } catch (e) {
+      return { ok: false, error: (e as Error).message.slice(0, 200) };
+    }
+  }
+
+  /** 启动后确认进程确实在跑（按可执行文件名匹配） */
+  private async verifyAppRunning(app: { name: string; launchPath: string; kind: string }): Promise<boolean> {
+    const names: string[] = [];
+    try {
+      const base = path.basename(app.launchPath).replace(/\.(exe|lnk)$/i, "");
+      if (base && !/\.lnk$/i.test(base)) names.push(base);
+    } catch {
+      /* ignore */
+    }
+    // 快捷方式：解析出真实目标 exe 名（Edge 在这台机器上就是走 lnk）
+    if (app.kind === "lnk") {
+      try {
+        const target = await this.ps(
+          `$s=(New-Object -ComObject WScript.Shell).CreateShortcut('${String(app.launchPath).replace(/'/g, "''")}'); $s.TargetPath`,
+          15000
+        );
+        const t = String(target).trim();
+        const n = t ? t.split(/[\\/]/).pop()!.replace(/\.exe$/i, "") : "";
+        if (n) names.push(n);
+      } catch {
+        /* ignore */
+      }
+    }
+    // 常见别名兜底：让 Edge 无论以 msedge 还是 msedgewebview2 形式存在都能确认
+    if (/edge/i.test(app.name)) names.push("msedge");
+    if (/chrome/i.test(app.name)) names.push("chrome");
+    if (/firefox/i.test(app.name)) names.push("firefox");
+    // UWP 应用（Win11 计算器 等）：launchPath 是 calc.exe，但真实进程名是 Calculator，
+    // 由 ApplicationFrameHost 承载。只按 calc 找会误判成"未启动"。
+    if (/calc/i.test(app.name) || /calc\.exe$/i.test(app.launchPath)) {
+      names.push("Calculator", "ApplicationFrameHost");
+    }
+    if (/mspaint|画图/i.test(app.name)) names.push("mspaint", "Paint");
+    if (/snippingtool|截图/i.test(app.name)) names.push("SnippingTool", "ScreenSketch");
+    if (/store|商店/i.test(app.name)) names.push("WinStore.App");
+
+    for (const n of [...new Set(names)].filter(Boolean)) {
+      try {
+        const out = await this.ps(
+          `$p=Get-Process -Name '${n.replace(/'/g, "''")}' -ErrorAction SilentlyContinue; if ($p) { 'RUNNING' } else { 'NONE' }`,
+          15000
+        );
+        if (/RUNNING/.test(String(out))) return true;
+      } catch {
+        /* 试下一个 */
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 在浏览器里打开 URL / 搜索。
+   *
+   * 实现要点：不假设 PATH 里有 msedge（本机就没有），
+   * 而是先从应用目录里解析出真实可用的浏览器，再把网址作为参数传给它。
+   * 若一个都没有，退化为系统默认关联（Start-Process 直接打开 URL）。
+   */
+  private async launchInBrowser(url: string, label: string): Promise<{ ok: boolean; output: string }> {
+    const candidates = await appCatalog.resolve("浏览器");
+    const esc = (s: string) => String(s).replace(/'/g, "''");
+
+    for (const app of candidates.slice(0, 3)) {
+      const r = await this.launchApp(app, url);
+      if (r.ok) {
+        safetyManager.audit("open_url", { url, browser: app.name, kind: app.kind, ok: true });
+        await new Promise((res) => setTimeout(res, 1000));
+        return { ok: true, output: `已在「${app.name}」中${label}。请用一句话简短确认，不要复述过程。` };
+      }
+      logger.warn(`[Orchestrator] 用「${app.name}」打开失败：${r.error}`);
+    }
+
+    // 兜底：交给系统默认程序关联
+    try {
+      await this.ps(`Start-Process '${esc(url)}' -ErrorAction Stop; 'ok'`, 15000);
+      safetyManager.audit("open_url", { url, browser: "system-default", ok: true });
+      return { ok: true, output: `已用系统默认程序${label}。请用一句话简短确认。` };
+    } catch (e) {
+      safetyManager.audit("open_url", { url, browser: "none", ok: false, error: (e as Error).message });
+      return { ok: false, output: `${label}失败：本机未找到可用浏览器（${(e as Error).message.slice(0, 120)}）。请如实告知用户。` };
+    }
+  }
+
+  /** 执行 PowerShell 并返回 stdout（强制 UTF-8，避免中文乱码） */
+  private ps(script: string, timeoutMs = 20000): Promise<string> {
+    return new Promise((resolve, reject) => {
+      execFile(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
+         `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8; ${script}`],
+        { timeout: timeoutMs, windowsHide: true, encoding: "utf8" },
+        (err, stdout, stderr) => {
+          if (err) reject(new Error(`${err.message} ${String(stderr).slice(0, 200)}`));
+          else resolve(String(stdout || "").trim());
+        }
+      );
+    });
   }
 
   /* ---------------- 联网辅助 ---------------- */

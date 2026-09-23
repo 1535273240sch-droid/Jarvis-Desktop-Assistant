@@ -504,7 +504,13 @@
             <input id="customVoiceInput" placeholder="输入自定义音色ID" style="display:none; max-width: 140px;" />
             <button id="btnSaveVoice">应用</button>
           </div>
-          <div class="hint">上列三项为当前账号<b>实测被服务端接受</b>的音色；填入其他值会被服务端以 “voice ... is not valid” 拒绝。</div>
+          <div class="row">
+            <button id="btnFetchVoices">一键获取全部音色</button>
+            <button id="btnTestVoice">测试当前音色</button>
+          </div>
+          <div class="hint" id="voiceListHint">
+            点击「一键获取全部音色」会拉取接口音色并合并本机实测可用的内置音色。
+          </div>
         </div>
 
         <div class="field">
@@ -569,6 +575,29 @@
         </div>
 
         <div class="field">
+          <label>助手人设与行为准则（系统提示词）</label>
+          <textarea id="instructions" rows="4" placeholder="你是 Jarvis，运行在 Windows 11 桌面上的智能助理…"></textarea>
+          <div class="row">
+            <button id="btnSaveInstructions">保存人设</button>
+            <button id="btnResetInstructions">恢复默认</button>
+          </div>
+          <div class="hint">决定助手的说话风格、称呼与行事准则。修改后对新会话生效（正在进行的语音会话需重开）。</div>
+        </div>
+
+        <div class="field">
+          <label>长期记忆（跨会话记住的事实与偏好）</label>
+          <div class="row">
+            <input id="memoryInput" placeholder="例如：我习惯用 VS Code 写 Python" />
+            <button id="btnAddMemory">添加</button>
+          </div>
+          <div id="memoryList" class="hint">读取中...</div>
+          <div class="row">
+            <button id="btnClearMemory">清空全部记忆</button>
+          </div>
+          <div class="hint">记忆会随新会话注入模型。也可直接对 Jarvis 说「记住…」由它自动写入。</div>
+        </div>
+
+        <div class="field">
           <label>执行模式</label>
           <div class="row">
             <select id="execMode">
@@ -578,6 +607,10 @@
             <button id="btnSaveExecMode">应用</button>
           </div>
           <div class="hint">全自动模式下，打开软件、读写文件、执行命令、点屏幕等操作都会直接执行；所有行为仍完整写入 <code>audit.jsonl</code> 供事后追溯。按 <code>Ctrl+Alt+X</code> 可随时急停。</div>
+          <div class="row" id="estopRow">
+            <button id="btnEstopReset">解除急停并恢复桌面控制</button>
+          </div>
+          <div class="hint" id="estopHint">急停当前未触发。</div>
         </div>
 
         <div class="field">
@@ -589,11 +622,48 @@
           <div class="hint">出于安全，留空将不会启动工具执行（空数组等于放开整个文件系统）。目录白名单不约束终端命令，高危操作仍会弹窗确认。</div>
         </div>
 
+        <div class="field">
+          <label>外部 MCP 工具扩展（接上别的工具）</label>
+          <div class="row">
+            <select id="mcpPreset">
+              <option value="">选择一个常见 MCP 服务器...</option>
+            </select>
+            <input id="mcpPresetValue" placeholder="需要填的参数（如目录/Token）" style="max-width:150px" />
+            <button id="btnMcpAddPreset">添加</button>
+          </div>
+          <textarea id="mcpServersJson" rows="5" placeholder='[{"name":"filesystem","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","C:\\data"]}]'></textarea>
+          <div class="row">
+            <button id="btnMcpSave" class="primary">保存并重连</button>
+            <button id="btnMcpTest">测试连接</button>
+            <button id="btnMcpRefresh">刷新状态</button>
+          </div>
+          <div id="mcpExtStatus" class="hint">读取中...</div>
+          <div class="hint">
+            这里配置的服务器会与内置工具一起提供给助手，工具名会自动加 <code>服务器名__</code> 前缀避免重名。
+            首次使用某个 server 时 npx 会自动下载它（需要联网）。
+          </div>
+        </div>
+
         <div class="kv"><span>工具执行状态</span><span id="mcpStatus">读取中...</span></div>
         <div class="kv"><span>WebGPU 状态</span><span id="gpuStatus">未检测</span></div>
         <div class="kv"><span>配置文件位置</span><span id="cfgPath">读取中...</span></div>
         <div class="row">
           <button id="btnGpu">重跑 WebGPU 自检</button>
+        </div>
+
+        <div class="field">
+          <label>问题诊断（按类别统计「哪些事没做成」）</label>
+          <div class="row">
+            <button id="btnRefreshDiag">刷新</button>
+            <button id="btnOpenLogDir">打开日志目录</button>
+            <button id="btnClearDiag">清空错误日志</button>
+          </div>
+          <div id="diagSummary" class="hint">读取中...</div>
+          <div id="diagRecent" class="hint"></div>
+          <div class="hint">
+            分类说明：工具执行=指令未执行成功；实时语音=语音链路；屏幕视觉=看屏幕；桌面控制=鼠标键盘；网络=联网请求。
+            完整明细见 <code>errors.jsonl</code>，逐条日志见 <code>jarvis-orb.log</code>。
+          </div>
         </div>
       </div>
     </details>
@@ -656,6 +726,36 @@ function addMsg(cls, text) {
   return d;
 }
 
+/* ---------------- 语音实时字幕 ---------------- */
+
+let liveUserEl = null;
+let liveUserText = '';
+
+function renderLiveUser(delta, done) {
+  if (done) {
+    const t = (liveUserText + (delta || '')).trim();
+    clearLiveUser();
+    if (t) addMsg('user', t);
+    return;
+  }
+  liveUserText += delta || '';
+  if (!liveUserText.trim()) return;
+  if (!liveUserEl) {
+    liveUserEl = document.createElement('div');
+    liveUserEl.className = 'msg user';
+    liveUserEl.style.opacity = '0.65';
+    chat.appendChild(liveUserEl);
+  }
+  liveUserEl.textContent = liveUserText + ' ▌';
+  chat.scrollTop = chat.scrollHeight;
+}
+
+function clearLiveUser() {
+  if (liveUserEl && liveUserEl.parentNode) liveUserEl.parentNode.removeChild(liveUserEl);
+  liveUserEl = null;
+  liveUserText = '';
+}
+
 function onMessage(payload) {
   if (!payload) return;
 
@@ -665,8 +765,14 @@ function onMessage(payload) {
     addMsg('user', payload.userText);
     currentAssistantEl = null;
     currentThinkingEl = null;
+    clearLiveUser();
     return;
   }
+
+  // 语音实时字幕：用户说话过程中就显示出来（含被打断时未说完的片段）。
+  // 这样用户能立刻确认"它听到了"，而不是干等它说完才轮到自己的指令。
+  if (payload.userTranscriptPartial !== undefined) { renderLiveUser(payload.userTranscriptPartial, false); return; }
+  if (payload.userTranscriptDelta !== undefined) { renderLiveUser(payload.userTranscriptDelta, Boolean(payload.userTranscriptDone)); return; }
 
   if (payload.thinkingDelta !== undefined) {
     if (!currentThinkingEl) {
@@ -835,7 +941,7 @@ async function startCapture() {
 
   analyser = captureCtx.createAnalyser();
   analyser.fftSize = 2048;
-  analyser.smoothingTimeConstant = 0.65;
+  analyser.smoothingTimeConstant = 0.35;
   freqData = new Uint8Array(analyser.frequencyBinCount);
   sourceNode.connect(analyser);
 
@@ -928,16 +1034,24 @@ function startBandsLoop() {
 
     const rawAll = rawLow * 0.45 + rawMid * 0.4 + rawHigh * 0.25;
 
+    // 平滑：起音更快、释放略慢，让球体跟随语音起伏更明显
+    // （实测反馈动态不够，故把起音时间常数从 0.05 收紧到 0.03）
     const smoothTo = (cur, target) => {
-      const tau = target > cur ? 0.05 : 0.22;
+      const tau = target > cur ? 0.03 : 0.26;
       const a = 1 - Math.exp(-dt / tau);
       return cur + a * (target - cur);
     };
-    const SENS = 2.0; // 提高频谱灵敏度
-    smooth.low = smoothTo(smooth.low, rawLow * SENS);
-    smooth.mid = smoothTo(smooth.mid, rawMid * SENS);
-    smooth.high = smoothTo(smooth.high, rawHigh * SENS);
-    smooth.all = smoothTo(smooth.all, rawAll * SENS);
+    // 灵敏度：原 2.0 在正常说话音量下球体形变偏小，提到 2.8 并做软压缩，
+    // 既能明显起伏，又避免削顶成"一直满格"失去层次。
+    const SENS = 2.8;
+    const soft = (v) => {
+      const x = Math.max(0, v);
+      return x <= 0.7 ? x : 0.7 + (1 - Math.exp(-(x - 0.7) * 2.2)) * 0.3;
+    };
+    smooth.low = smoothTo(smooth.low, soft(rawLow * SENS));
+    smooth.mid = smoothTo(smooth.mid, soft(rawMid * SENS));
+    smooth.high = smoothTo(smooth.high, soft(rawHigh * SENS));
+    smooth.all = smoothTo(smooth.all, soft(rawAll * SENS));
 
     const cl = (v) => Math.max(0, Math.min(1, Math.round(v * 1000) / 1000));
     api.sendAudioBands({ low: cl(smooth.low), mid: cl(smooth.mid), high: cl(smooth.high), all: cl(smooth.all) });
@@ -959,7 +1073,7 @@ function ensurePlayCtx() {
   // 建立播放端频谱分析节点，使 AI 说话时同样实时驱动球体
   playAnalyser = playCtx.createAnalyser();
   playAnalyser.fftSize = 2048;
-  playAnalyser.smoothingTimeConstant = 0.55;
+  playAnalyser.smoothingTimeConstant = 0.3;
   playFreqData = new Uint8Array(playAnalyser.frequencyBinCount);
 
   playGain.connect(playAnalyser);
@@ -1072,6 +1186,27 @@ $('btnStop').onclick = async () => {
 
 $('btnInterrupt').onclick = async () => { await api.interrupt(); };
 
+$('btnEstopReset').onclick = async () => {
+  const r = await api.emergencyStopReset();
+  toast(r && r.stopped === false ? '已解除急停' : '急停仍处于触发状态');
+  refreshEstop();
+};
+
+async function refreshEstop() {
+  try {
+    const s = await api.emergencyStopStatus();
+    const stopped = Boolean(s && s.stopped);
+    $('estopHint').textContent = stopped
+      ? '⚠️ 急停已触发：所有鼠标/键盘/点击操作都会立即中止。点击左侧按钮可解除。'
+      : '急停当前未触发。';
+    $('btnEstopReset').disabled = !stopped;
+  } catch (e) {
+    $('estopHint').textContent = '急停状态读取失败。';
+  }
+}
+refreshEstop();
+setInterval(refreshEstop, 3000);
+
 $('btnScreen').onclick = async () => {
   toast('正在截取屏幕并分析...');
   const r = await api.visionCapture({ prompt: '请描述这个窗口的内容；如果有报错或异常，请解释原因并给出建议。', target: 'active_window' });
@@ -1129,6 +1264,10 @@ async function loadConfig() {
 
     $('allowedDirs').value = (c.allowedDirectories || []).join('\n');
     $('execMode').value = c.confirmHighRisk ? 'confirm' : 'auto';
+    // 人设提示词：未编辑过则显示当前生效值
+    if ($('instructions') && !$('instructions').dataset.dirty) {
+      $('instructions').value = c.instructions || '';
+    }
     $('cfgPath').textContent = c.configPath || '未知';
     $('mcpStatus').textContent = (c.mcp && c.mcp.ready)
       ? ('已就绪，' + c.mcp.toolCount + ' 个工具')
@@ -1144,6 +1283,57 @@ $('voiceSelect').onchange = () => {
     $('customVoiceInput').focus();
   } else {
     $('customVoiceInput').style.display = 'none';
+  }
+};
+
+/* ---------------- 音色列表 ---------------- */
+
+$('btnFetchVoices').onclick = async () => {
+  const btn = $('btnFetchVoices');
+  btn.disabled = true;
+  $('voiceListHint').textContent = '正在获取音色列表...';
+  try {
+    const r = await api.voiceList();
+    const builtin = (r && r.builtin) || [];
+    const custom = (r && r.custom) || [];
+    const sel = $('voiceSelect');
+    const cur = sel.value;
+    // 重建下拉：保留「自定义」入口
+    sel.innerHTML =
+      builtin.map((v) => '<option value="' + esc(v.id) + '">' + esc(v.label) + '（' + esc(v.id) + '）</option>').join('') +
+      (custom.length
+        ? '<optgroup label="自定义/克隆音色">' +
+          custom.map((v) => '<option value="' + esc(v.id) + '">' + esc(v.label) + '</option>').join('') +
+          '</optgroup>'
+        : '') +
+      '<option value="custom">自定义音色代码...</option>';
+    // 尽量保持当前选择
+    if ([...sel.options].some((o) => o.value === cur)) sel.value = cur;
+    $('voiceListHint').innerHTML =
+      '✅ 内置可用 <b>' + builtin.length + '</b> 个' +
+      (custom.length ? '，自定义 ' + custom.length + ' 个' : '（接口未返回自定义音色——该接口只列克隆音色，属正常）') +
+      (r && r.error ? '<br/>⚠️ ' + esc(r.error) : '');
+    toast('已获取 ' + builtin.length + ' 个内置音色');
+  } catch (e) {
+    $('voiceListHint').textContent = '获取失败：' + (e && e.message ? e.message : e);
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+$('btnTestVoice').onclick = async () => {
+  const v = $('voiceSelect').value === 'custom'
+    ? $('customVoiceInput').value.trim()
+    : $('voiceSelect').value;
+  if (!v) { toast('请先选择或填写音色'); return; }
+  $('voiceListHint').textContent = '正在向服务端校验音色「' + v + '」...';
+  const r = await api.voiceValidate(v);
+  if (r && r.ok) {
+    $('voiceListHint').innerHTML = '✅ 音色 <b>' + esc(v) + '</b> 被服务端接受，可正常使用。';
+    toast('该音色可用');
+  } else {
+    $('voiceListHint').innerHTML = '❌ 音色 <b>' + esc(v) + '</b> 被拒绝：' + esc((r && r.reason) || '未知原因');
+    toast('该音色不可用');
   }
 };
 
@@ -1230,11 +1420,259 @@ $('btnGpu').onclick = async () => {
   toast(r.supported ? 'WebGPU 可用' : 'WebGPU 不可用，球体无法渲染');
 };
 
+/* ---------------- 人设 ---------------- */
+
+$('instructions').addEventListener('input', () => { $('instructions').dataset.dirty = '1'; });
+
+$('btnSaveInstructions').onclick = async () => {
+  const v = $('instructions').value.trim();
+  if (!v) { toast('人设不能为空'); return; }
+  await api.setConfig({ instructions: v });
+  delete $('instructions').dataset.dirty;
+  toast('人设已保存，重开会话后生效');
+};
+
+$('btnResetInstructions').onclick = async () => {
+  // 由主进程写回默认值，避免前端硬编码文案与后端不一致
+  await api.setConfig({ instructions: '' });
+  const c = await api.getConfig();
+  $('instructions').value = c.instructions || '';
+  delete $('instructions').dataset.dirty;
+  toast('已恢复默认人设');
+};
+
+/* ---------------- 长期记忆 ---------------- */
+
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+async function loadMemory() {
+  try {
+    const m = await api.memoryGet();
+    const facts = (m && m.facts) || [];
+    if (!facts.length) {
+      $('memoryList').innerHTML = '暂无记忆。可直接对我说「记住…」，或在上方输入后点添加。';
+      return;
+    }
+    $('memoryList').innerHTML =
+      '<div style="margin-bottom:4px">共 ' + facts.length + ' 条：</div>' +
+      facts.slice(-50).reverse().map((f) =>
+        '<div style="display:flex;gap:6px;align-items:center;margin:2px 0">' +
+          '<span style="flex:1;word-break:break-all">• ' + esc(f.text) + '</span>' +
+          '<button data-del="' + encodeURIComponent(f.text) + '" style="padding:1px 6px">删除</button>' +
+        '</div>'
+      ).join('');
+    $('memoryList').querySelectorAll('button[data-del]').forEach((b) => {
+      b.onclick = async () => {
+        await api.memoryRemove(decodeURIComponent(b.dataset.del));
+        toast('已删除该条记忆');
+        loadMemory();
+      };
+    });
+  } catch (e) {
+    $('memoryList').textContent = '读取记忆失败：' + (e && e.message ? e.message : e);
+  }
+}
+
+$('btnAddMemory').onclick = async () => {
+  const v = $('memoryInput').value.trim();
+  if (!v) { toast('请输入要记住的内容'); return; }
+  const r = await api.memoryAdd(v);
+  $('memoryInput').value = '';
+  toast(r && r.added === false ? '这条之前已记住' : '已写入长期记忆');
+  loadMemory();
+};
+$('memoryInput').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('btnAddMemory').click(); });
+
+$('btnClearMemory').onclick = async () => {
+  if (!confirm('确定清空全部长期记忆？此操作不可撤销。')) return;
+  await api.memoryClear();
+  toast('长期记忆已清空');
+  loadMemory();
+};
+
+/* ---------------- 外部 MCP ---------------- */
+
+let MCP_PRESET_CACHE = [];
+
+async function loadMcpPresets() {
+  try {
+    MCP_PRESET_CACHE = (await api.mcpExtPresets()) || [];
+    $('mcpPreset').innerHTML =
+      '<option value="">选择一个常见 MCP 服务器...</option>' +
+      MCP_PRESET_CACHE.map((p) => '<option value="' + esc(p.id) + '">' + esc(p.label) + '</option>').join('');
+  } catch (e) {
+    /* 预设列表拿不到不影响手动填写 */
+  }
+}
+
+$('mcpPreset').onchange = () => {
+  const p = MCP_PRESET_CACHE.find((x) => x.id === $('mcpPreset').value);
+  const need = p && p.requires && p.requires[0];
+  const input = $('mcpPresetValue');
+  if (need) {
+    input.style.display = 'inline-block';
+    input.placeholder = need.label + (need.placeholder ? '（' + need.placeholder + '）' : '');
+  } else {
+    input.style.display = 'none';
+    input.placeholder = '';
+  }
+  if (p) $('mcpExtStatus').textContent = p.description;
+};
+
+$('btnMcpAddPreset').onclick = async () => {
+  const id = $('mcpPreset').value;
+  if (!id) { toast('请先选择一个服务器'); return; }
+  const preset = MCP_PRESET_CACHE.find((x) => x.id === id);
+  const need = preset && preset.requires && preset.requires[0];
+  const val = $('mcpPresetValue').value.trim();
+  if (need && !val) { toast('请填写：' + need.label); return; }
+
+  let list = [];
+  try { list = JSON.parse($('mcpServersJson').value || '[]'); } catch (e) { list = []; }
+  if (!Array.isArray(list)) list = [];
+  if (list.some((s) => s && s.name === preset.config.name)) { toast('该服务器已在列表中'); return; }
+
+  const cfg = JSON.parse(JSON.stringify(preset.config));
+  if (need && val) {
+    if (need.key === 'env') cfg.env = Object.assign({}, cfg.env || {}, { [need.name]: val });
+    else cfg.args = (cfg.args || []).map((a) => (a === ('REPLACE_WITH_' + need.name.toUpperCase()) ? val : a));
+  }
+  list.push(cfg);
+  $('mcpServersJson').value = JSON.stringify(list, null, 2);
+  $('mcpExtStatus').textContent = '已加入列表，点击「保存并重连」生效。';
+  toast('已添加：' + preset.label);
+};
+
+$('btnMcpSave').onclick = async () => {
+  let list;
+  try {
+    list = JSON.parse($('mcpServersJson').value || '[]');
+  } catch (e) {
+    toast('JSON 格式有误：' + e.message);
+    return;
+  }
+  if (!Array.isArray(list)) { toast('配置必须是数组'); return; }
+  $('mcpExtStatus').textContent = '正在重连外部 MCP...';
+  try {
+    const r = await api.mcpExtReload(list);
+    toast('已保存：成功 ' + (r.started || 0) + '，失败 ' + (r.failed || 0));
+    renderMcpExtStatus(r.status);
+  } catch (e) {
+    $('mcpExtStatus').textContent = '重连失败：' + (e && e.message ? e.message : e);
+  }
+};
+
+$('btnMcpTest').onclick = async () => {
+  let list;
+  try {
+    list = JSON.parse($('mcpServersJson').value || '[]');
+  } catch (e) {
+    toast('JSON 格式有误：' + e.message);
+    return;
+  }
+  const cfg = Array.isArray(list) ? list[0] : null;
+  if (!cfg) { toast('请先填写至少一个服务器配置'); return; }
+  $('mcpExtStatus').textContent = '正在测试「' + cfg.name + '」...（首次会下载该 server，可能较慢）';
+  const r = await api.mcpExtTest(cfg);
+  if (r && r.ok) {
+    $('mcpExtStatus').innerHTML =
+      '✅ 连接成功：<b>' + esc(cfg.name) + '</b>，发现 <b>' + (r.tools || []).length + '</b> 个工具：' +
+      esc((r.tools || []).map((t) => t.name).join(', ').slice(0, 200));
+    toast('连接成功');
+  } else {
+    $('mcpExtStatus').textContent = '❌ 连接失败：' + ((r && r.reason) || '未知原因');
+    toast('连接失败');
+  }
+};
+
+function renderMcpExtStatus(servers) {
+  if (!servers || !servers.length) {
+    $('mcpExtStatus').textContent = '未配置外部 MCP 服务器（助手当前只用内置工具）。';
+    return;
+  }
+  $('mcpExtStatus').innerHTML = servers.map((s) =>
+    (s.ready ? '✅ ' : '❌ ') + '<b>' + esc(s.name) + '</b>：' +
+    (s.ready ? s.toolCount + ' 个工具' : esc(s.error || '未就绪')) +
+    '<br/><span style="opacity:.6">' + esc(s.command) + '</span>'
+  ).join('<br/>');
+}
+
+async function loadMcpExt() {
+  try {
+    const r = await api.mcpExtStatus();
+    $('mcpServersJson').value = JSON.stringify(r.configured || [], null, 2);
+    renderMcpExtStatus(r.servers);
+  } catch (e) {
+    $('mcpExtStatus').textContent = '读取外部 MCP 状态失败。';
+  }
+}
+
+$('btnMcpRefresh').onclick = () => { loadMcpExt(); toast('已刷新'); };
+
+/* ---------------- 问题诊断 ---------------- */
+
+const CATEGORY_LABEL = {
+  tool_execution: '工具执行（指令未做成）',
+  tool_unavailable: '工具不可用',
+  realtime: '实时语音',
+  vision: '屏幕视觉',
+  desktop_control: '桌面控制',
+  network: '网络请求',
+  config: '配置',
+  updater: '自动更新',
+  renderer: '渲染进程',
+  internal: '其他',
+};
+
+async function loadDiag() {
+  try {
+    const d = await api.diagErrors();
+    const sum = (d && d.summary) || [];
+    if (!sum.length) {
+      $('diagSummary').innerHTML = '✅ 暂无记录的分类错误。';
+    } else {
+      $('diagSummary').innerHTML =
+        '<div style="margin-bottom:4px">按类别聚合（近 300 条）：</div>' +
+        sum.map((s) =>
+          '<div>• <b>' + esc(CATEGORY_LABEL[s.category] || s.category) + '</b> / ' + esc(s.source) +
+          '：<b>' + s.count + '</b> 次 <span style="opacity:.7">最近 ' + esc((s.lastTs || '').replace('T', ' ').slice(5, 19)) + '</span></div>'
+        ).join('');
+    }
+    const recent = (d && d.recent) || [];
+    $('diagRecent').innerHTML = recent.length
+      ? '<details style="margin-top:6px"><summary>查看最近 ' + recent.length + ' 条明细</summary>' +
+        recent.slice(-30).reverse().map((r) =>
+          '<div style="margin:3px 0;word-break:break-all">[' + esc((r.ts || '').replace('T', ' ').slice(5, 19)) + '] ' +
+          '<b>' + esc(CATEGORY_LABEL[r.category] || r.category) + '</b> ' +
+          (r.tool ? '(' + esc(r.tool) + ') ' : '') + esc((r.message || '').slice(0, 200)) + '</div>'
+        ).join('') + '</details>'
+      : '';
+  } catch (e) {
+    $('diagSummary').textContent = '读取诊断信息失败：' + (e && e.message ? e.message : e);
+  }
+}
+
+$('btnRefreshDiag').onclick = () => { loadDiag(); toast('已刷新'); };
+$('btnOpenLogDir').onclick = async () => { await api.diagOpenDir(); };
+$('btnClearDiag').onclick = async () => {
+  if (!confirm('确定清空分类错误日志（errors.jsonl）？')) return;
+  await api.diagClearErrors();
+  toast('错误日志已清空');
+  loadDiag();
+};
+
 /* ---------------- 初始化 ---------------- */
 
 setState('idle');
 loadConfig();
+loadMemory();
+loadDiag();
+loadMcpPresets();
+loadMcpExt();
 setInterval(loadConfig, 8000);
+setInterval(loadDiag, 6000);
 </script>
 </body>
 </html>

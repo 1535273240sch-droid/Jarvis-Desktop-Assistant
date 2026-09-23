@@ -45,25 +45,38 @@ export interface CaptureMeta {
   width: number;
   height: number;
   displayId: string;
+  /** 非空表示未能按预期截取（例如窗口匹配失败退回整屏），需要告知模型与用户 */
+  fallbackReason?: string;
 }
 
 function runPowerShell(script: string, timeoutMs = 15_000): Promise<string> {
   return new Promise((resolve, reject) => {
+    // 中文 Windows 上 PowerShell 默认按当前控制台代码页（GBK）输出 stdout，
+    // 而 Node 按 UTF-8 解码，中文窗口标题会变成 "?????"。
+    // 一旦标题被破坏，「按标题匹配捕获源」就会失配、退回整屏，
+    // 表现为「让他看屏幕，他一直在看却不知道看的是什么」。
+    // 因此强制 PowerShell 以 UTF-8 输出。
+    const wrapped = `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8; ${script}`;
     const args = [
       "-NoProfile",
       "-NonInteractive",
       "-ExecutionPolicy",
       "Bypass",
       "-Command",
-      script,
+      wrapped,
     ];
-    execFile("powershell.exe", args, { timeout: timeoutMs, windowsHide: true }, (err, stdout, stderr) => {
-      if (err) {
-        reject(new Error(`PowerShell 执行失败: ${err.message} ${String(stderr).slice(0, 300)}`));
-        return;
+    execFile(
+      "powershell.exe",
+      args,
+      { timeout: timeoutMs, windowsHide: true, encoding: "utf8" },
+      (err, stdout, stderr) => {
+        if (err) {
+          reject(new Error(`PowerShell 执行失败: ${err.message} ${String(stderr).slice(0, 300)}`));
+          return;
+        }
+        resolve(String(stdout).trim());
       }
-      resolve(String(stdout).trim());
-    });
+    );
   });
 }
 
@@ -98,8 +111,20 @@ class VisionManager {
           types: ["window"],
           thumbnailSize: { width: w, height: h },
         });
-        const titleKey = win.title.slice(0, 24);
-        const hit = sources.find((s) => s.name && titleKey && s.name.startsWith(titleKey));
+        // 标题匹配：先精确、再前缀，最后双向包含（标题可能被截断或带后缀）
+        const norm = (s: string) => (s || "").replace(/\s+/g, " ").trim();
+        const target0 = norm(win.title);
+        let hit = sources.find((s) => norm(s.name) === target0);
+        if (!hit && target0.length >= 4) {
+          const head = target0.slice(0, 24);
+          hit = sources.find((s) => norm(s.name).startsWith(head));
+        }
+        if (!hit && target0.length >= 4) {
+          hit = sources.find((s) => {
+            const n = norm(s.name);
+            return n.length >= 4 && (n.includes(target0) || target0.includes(n));
+          });
+        }
         if (hit && !hit.thumbnail.isEmpty()) {
           const size = hit.thumbnail.getSize();
           logger.info(`[Vision] 活动窗口原图 ${size.width}x${size.height}（窗口 ${w}x${h}）`);
@@ -112,10 +137,30 @@ class VisionManager {
             displayId: this.displayOfPoint(win.bounds),
           };
         }
-        logger.warn(`[Vision] 未在捕获源中找到窗口「${win.title}」，回退整屏`);
+        // 匹配失败时不要静默退回整屏：整屏会让模型看到一堆无关内容，
+        // 用户体感就是「一直在看，却不知道在看什么」。改为明确告知。
+        logger.warn(
+          `[Vision] 未能匹配到窗口捕获源：title="${win.title}"，可用源=${sources.length} 个` +
+            `（前几个：${sources.slice(0, 5).map((s) => norm(s.name).slice(0, 20)).join(" / ") || "无"}）`
+        );
+        safetyManager.audit("screenshot_window_match_failed", {
+          title: win.title,
+          processName: win.processName,
+          sourceCount: sources.length,
+        });
+        const fallback = await this.captureEntireScreen();
+        return { ...fallback, fallbackReason: `未匹配到窗口「${win.title}」，已改为整屏截图` } as CaptureMeta;
       }
     }
 
+    if (target === "active_window") {
+      logger.warn("[Vision] 未识别到活动窗口，回退整屏截图");
+    }
+    return this.captureEntireScreen();
+  }
+
+  /** 整屏截图（按主显示器物理像素请求，限制最大边长控制体积） */
+  private async captureEntireScreen(): Promise<CaptureMeta> {
     // 整屏：按主显示器物理像素请求
     let thumbSize = { width: 1920, height: 1080 };
     let region = { x: 0, y: 0, width: 1920, height: 1080 };
@@ -138,9 +183,30 @@ class VisionManager {
     }
 
     const sources = await desktopCapturer.getSources({ types: ["screen"], thumbnailSize: thumbSize });
-    const scr = sources.find((s) => s.id.startsWith("screen:")) ?? sources[0];
+    // 图源必须与 region 对应：此前取 sources[0]，多显示器下可能拿到别的屏，
+    // 导致 region 与实际画面不一致、坐标换算整体偏移。
+    const wantedPrefix = `screen:${displayId}:`;
+    const matching = sources.find((s) => s.id.startsWith(wantedPrefix));
+    const scr = matching ?? sources.find((s) => s.id.startsWith(`screen:${displayId}`)) ?? sources[0];
     if (!scr) throw new Error("未获取到屏幕捕获源");
-    safetyManager.audit("screenshot", { target: "entire_screen", size: thumbSize });
+    if (!matching) {
+      logger.warn(
+        `[Vision] 未找到与主显示器(id=${displayId})对应的捕获源，已退回 ${scr.id}；` +
+          `region 与画面可能不一致，坐标换算结果需谨慎使用`
+      );
+    } else {
+      // 命中时用该源的物理尺寸校正 region，保证 图像像素 ↔ 屏幕物理像素 一一对应
+      const size = scr.thumbnail.getSize();
+      if (size.width > 0 && size.height > 0) {
+        const scaleX = region.width / size.width;
+        const scaleY = region.height / size.height;
+        if (Math.abs(scaleX - scaleY) > 0.02 || scaleX < 1) {
+          // 缩略图被压缩：region 不变（它描述的是屏幕区域），仅在日志中留痕
+          logger.info(`[Vision] 整屏缩略图 ${size.width}x${size.height}，屏幕区域 ${region.width}x${region.height}（含缩放）`);
+        }
+      }
+    }
+    safetyManager.audit("screenshot", { target: "entire_screen", size: thumbSize, sourceId: scr.id });
     return {
       png: scr.thumbnail.toPNG(),
       region,
@@ -341,6 +407,13 @@ public class W {
     if (r.success) {
       r.region = meta.region;
       r.imageSize = { width: meta.width, height: meta.height };
+      // 截图范围与预期不符时，必须把这件事写进返回文本交给模型。
+      // 否则模型拿到一张"并非目标窗口"的整屏图，会给出与用户问题无关的描述，
+      // 用户体感就是「它一直在看，却不知道在看什么」。
+      if (meta.fallbackReason) {
+        r.analysisText = `【注意】${meta.fallbackReason}。以下描述基于整屏画面，可能包含与问题无关的窗口，请据此判断。\n\n${r.analysisText}`;
+        logger.warn(`[Vision] ${meta.fallbackReason}`);
+      }
       // 解析模型给出的定位（图像像素空间）
       const t = parseVisionTarget(r.analysisText, meta.width, meta.height);
       if (t) {

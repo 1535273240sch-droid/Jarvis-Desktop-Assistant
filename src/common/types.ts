@@ -115,6 +115,20 @@ export interface VisionResult {
   imageSize?: { width: number; height: number };
 }
 
+/** 外部 MCP 服务器配置（stdio 传输） */
+export interface McpServerConfig {
+  /** 展示用名称，也用于工具名前缀，避免不同服务器的同名工具冲突 */
+  name: string;
+  /** 可执行文件，例如 "npx"、"node"、"python" */
+  command: string;
+  /** 启动参数，例如 ["-y", "@modelcontextprotocol/server-filesystem", "C:\\data"] */
+  args?: string[];
+  /** 额外环境变量 */
+  env?: Record<string, string>;
+  /** 是否启用，默认 true */
+  enabled?: boolean;
+}
+
 /** 运行时可调配置（保存在 userData/config.json） */
 export interface JarvisConfig {
   /** 配置结构版本，用于一次性迁移旧配置（当前为 2：全自动执行模式） */
@@ -140,6 +154,23 @@ export interface JarvisConfig {
   allowSensitiveInput: boolean;
   /** 全局急停快捷键（Electron accelerator，T07 第 6 节） */
   emergencyStopAccelerator: string;
+  /**
+   * 是否启用自动更新检查（默认关闭）。
+   *
+   * 默认关闭的原因：本仓库通过 GitHub Releases 发布，CI 会按 run_number 递增版本号
+   * （例如本机 1.0.0 装好后立刻被"更新"到上游 1.0.11）。若用户本地对源码做过修复，
+   * 自动更新会用上游版本把本地修复整体覆盖掉，且更新过程会清空安装目录，
+   * 表现为"装好的应用突然打不开/文件消失"。因此改为显式开启。
+   */
+  autoUpdate: boolean;
+  /**
+   * 外部 MCP 服务器列表（可选）。
+   *
+   * 让 Jarvis 能接上任意符合 MCP 协议的工具：
+   *   - command/args：以子进程 + stdio 方式启动（最常用，如 npx 一个 MCP server）
+   * 这些服务器的工具会与内置工具、DesktopCommander 工具一起下发给模型。
+   */
+  mcpServers?: McpServerConfig[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -189,12 +220,37 @@ export const IPC = {
   TOOL_CONFIRM_RESPONSE: "tool:confirm-response",
   TOOL_LIST: "tool:list",
 
+  // —— 全局急停 ——
+  EMERGENCY_STOP_STATUS: "emergency-stop:status",
+  EMERGENCY_STOP_RESET: "emergency-stop:reset",
+
   // —— 视觉 ——
   VISION_CAPTURE: "vision:capture",
 
   // —— 配置 ——
   CONFIG_GET: "config:get",
   CONFIG_SET: "config:set",
+
+  // —— 长期记忆 ——
+  MEMORY_GET: "memory:get",
+  MEMORY_ADD: "memory:add",
+  MEMORY_REMOVE: "memory:remove",
+  MEMORY_CLEAR: "memory:clear",
+
+  // —— 诊断日志 ——
+  DIAG_ERRORS: "diag:errors",
+  DIAG_CLEAR_ERRORS: "diag:clear-errors",
+  DIAG_OPEN_DIR: "diag:open-dir",
+
+  // —— 音色 ——
+  VOICE_LIST: "voice:list",
+  VOICE_VALIDATE: "voice:validate",
+
+  // —— 外部 MCP ——
+  MCP_EXT_STATUS: "mcp-ext:status",
+  MCP_EXT_RELOAD: "mcp-ext:reload",
+  MCP_EXT_TEST: "mcp-ext:test",
+  MCP_EXT_LIST_PRESETS: "mcp-ext:presets",
 
   // —— WebGPU 自检 ——
   GPU_CHECK: "gpu:check",
