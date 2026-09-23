@@ -187,7 +187,12 @@ console.log("\n=== 5. MCP 工具执行闭环 ===");
 {
   const entry = require.resolve("@wonderwhy-er/desktop-commander/dist/index.js");
   const { spawn } = await import("node:child_process");
-  const workDir = path.join(os.tmpdir(), "jarvis-regression");
+  // 用仓库内的真实目录，而不是 os.tmpdir()。
+  // 原因：CI 上 os.tmpdir()（如 D:\a\_temp）可能是 junction/符号链接，
+  // 而 desktop-commander 用 fs.realpath 校验路径，realpath 结果与白名单里的
+  // 字符串不一致就会被判成「不在白名单内」——这属于测试环境陷阱，不是产品缺陷。
+  const workDir = path.join(root, ".tmp-regression");
+  fs.rmSync(workDir, { recursive: true, force: true });
   fs.mkdirSync(workDir, { recursive: true });
   fs.writeFileSync(path.join(workDir, "probe.txt"), "regression-ok\n", "utf-8");
 
@@ -233,16 +238,35 @@ console.log("\n=== 5. MCP 工具执行闭环 ===");
   const setRes = await rpc("tools/call", { name: "set_config_value", arguments: { key: "allowedDirectories", value: [workDir] } }, 40000);
   check(!setRes.error, "目录白名单下发成功");
 
+  // desktop-commander 写配置是异步的（zod 校验 -> 落盘 -> 内存生效），
+  // 立刻调用会读到旧配置。CI 机器更慢，这里显式等待并轮询确认生效，
+  // 否则会把时序竞争误报成「白名单不生效」。
+  {
+    const deadline = Date.now() + 20000;
+    let effective = false;
+    while (Date.now() < deadline) {
+      const cfg = await rpc("tools/call", { name: "get_config", arguments: {} }, 20000);
+      const txt = Array.isArray(cfg.result?.content)
+        ? cfg.result.content.map((c) => c.text || "").join("\n")
+        : JSON.stringify(cfg.result ?? {});
+      // 配置已落到目标目录即视为生效
+      if (txt.includes(workDir.replace(/\\/g, "\\\\")) || txt.includes(workDir)) { effective = true; break; }
+      await new Promise((r) => setTimeout(r, 800));
+    }
+    check(effective, "白名单已确认生效（轮询 get_config）");
+  }
+
   const list = await rpc("tools/list", {});
   const EXPOSED = new Set(["start_process","interact_with_process","read_process_output","list_processes","read_file","write_file","list_directory","create_directory","move_file","get_file_info","edit_block","start_search"]);
   const exposed = (list.result?.tools || []).filter((t) => EXPOSED.has(t.name));
   check(exposed.length === 12, "暴露的工具数量正确", `${exposed.length} 个`);
 
   const ld = await rpc("tools/call", { name: "list_directory", arguments: { path: workDir } }, 60000);
-  check(/probe\.txt/.test(textOf(ld)), "list_directory 白名单内可读");
+  // 失败时把真实报错打进日志，便于在 CI 上直接定位（而不是只看一个 FAIL）
+  check(/probe\.txt/.test(textOf(ld)), "list_directory 白名单内可读", textOf(ld).replace(/\s+/g, " ").slice(0, 160));
 
   const outside = await rpc("tools/call", { name: "read_file", arguments: { path: "C:\\Windows\\win.ini" } }, 30000);
-  check(/not allowed|Path not allowed/i.test(textOf(outside)), "白名单外被拒绝（安全闸门生效）");
+  check(/not allowed|Path not allowed/i.test(textOf(outside)), "白名单外被拒绝（安全闸门生效）", textOf(outside).replace(/\s+/g, " ").slice(0, 120));
 
   // 用户真实场景：打开计算器
   const sp = await rpc("tools/call", { name: "start_process", arguments: { command: "calc.exe", timeout_ms: 5000 } }, 60000);
@@ -258,6 +282,8 @@ console.log("\n=== 5. MCP 工具执行闭环 ===");
   proc.kill();
   await new Promise((r) => setTimeout(r, 300));
   await ps("Get-Process -Name calc,notepad -ErrorAction SilentlyContinue | Stop-Process -Force");
+  // 清理回归用的临时目录，避免污染工作区
+  try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 // --------------------------------------------------------- 6. 提示词内容检查
