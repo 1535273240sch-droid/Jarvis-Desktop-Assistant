@@ -1,6 +1,6 @@
 {
   "name": "jarvis-desktop-assistant",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Jarvis - Windows 11 桌面 AI 助手（悬浮球 + 实时语音 + 工具执行 + 屏幕视觉）",
   "main": "dist/main/index.js",
   "author": "Jarvis Team",

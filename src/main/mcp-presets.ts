@@ -113,6 +113,20 @@ export const MCP_PRESETS: McpPreset[] = [
       enabled: true,
     },
   },
+  {
+    id: "windows-mcp",
+    label: "Windows 桌面控制（Windows-MCP）",
+    description:
+      "基于 UIA 无障碍树的桌面自动化，共 19 个工具：窗口管理（启动/缩放/切换）、UIA 快照与点击输入、剪贴板、注册表、系统通知、进程查杀、网页抓取。" +
+      "与内置视觉点击互补：UIA 直接读控件树，比截图猜坐标更准也更省 token。" +
+      "需先安装：uv tool install windows-mcp（详见 docs/Windows-MCP.md）。",
+    config: {
+      name: "windows-mcp",
+      command: "windows-mcp",
+      args: ["serve", "--transport", "stdio", "--exclude-tools", "Screenshot"],
+      enabled: true,
+    },
+  },
 ];
 
 /** 把预设实例化成可用配置，填入用户提供的参数 */

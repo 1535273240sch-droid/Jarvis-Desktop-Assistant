@@ -43,6 +43,11 @@
   - 针对高危命令（如格式化、删除全盘、杀关键系统进程）实施前置拦截；
   - 敏感操作强制弹出原生悬浮厚玻璃确认窗，必须由人工批准才可放行；
   - 所有工具调用全部以追加模式写入本地 `audit.jsonl` 审计日志，确保操作透明可追溯。
+- **外部 MCP 预设：Windows 桌面控制（Windows-MCP）**（v1.2.0 新增）：
+  - 一键接入社区项目 [CursorTouch/Windows-MCP](https://github.com/CursorTouch/Windows-MCP)（7k+ stars），补齐系统级桌面操作能力：UIA 无障碍树快照、窗口管理、剪贴板、注册表、系统通知、进程查杀、网页抓取等 19 个工具；
+  - UIA 直接读控件树定位元素，与内置"截图 + 视觉模型猜坐标"互补，点击更准、token 消耗更低；
+  - 外部工具自动加 `windows_mcp__` 前缀并入模型工具列表，调用同样经过安全闸门与审计日志；
+  - 安装与配置见 [docs/Windows-MCP.md](docs/Windows-MCP.md)。
 
 ### 4. 👁️ 多模态屏幕视觉理解与扩展 (Vision Understanding)
 - **双通道解耦架构**：克服实时语音通道不支持传图的限制，采用独立的 HTTPS 多模态通道完成屏幕理解。
