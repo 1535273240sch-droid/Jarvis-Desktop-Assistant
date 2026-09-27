@@ -1,6 +1,6 @@
 import { EventEmitter } from "node:events";
 import * as path from "node:path";
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, spawnSync, ChildProcess } from "node:child_process";
 import { logger } from "./logger";
 import { configManager } from "./config";
 import { safetyManager } from "./safety";
@@ -288,7 +288,14 @@ export class McpClient extends EventEmitter {
   stop(): void {
     if (this.proc) {
       try {
-        this.proc.kill();
+        if (process.platform === "win32" && this.proc.pid) {
+          // 服务器是 Jarvis.exe(ELECTRON_RUN_AS_NODE) 的直接子进程，但它自己还会
+          // 拉起终端会话（start_process 的交互式进程）；Windows 不级联杀子进程，
+          // 只 kill() 服务器会把那些会话留成孤儿，所以连整棵进程树一起清。
+          spawnSync("taskkill", ["/pid", String(this.proc.pid), "/T", "/F"], { stdio: "ignore" });
+        } else {
+          this.proc.kill();
+        }
       } catch {
         /* ignore */
       }

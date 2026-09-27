@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { execFile, spawnSync, ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { logger } from "./logger";
@@ -33,6 +33,8 @@ const PY_INSTALL_MIRROR = "https://registry.npmmirror.com/-/binary/python-build-
 const PYPI_FALLBACK = "https://pypi.tuna.tsinghua.edu.cn/simple";
 
 let inFlight: Promise<{ ok: boolean; exePath?: string; log: string }> | null = null;
+/** 安装期间在跑的子进程（uv / powershell）；应用退出时要一并清掉，否则会留成孤儿 */
+const activeChildren = new Set<ChildProcess>();
 
 function run(
   exe: string,
@@ -40,7 +42,7 @@ function run(
   opts: { timeoutMs?: number; env?: Record<string, string> } = {}
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
-    execFile(
+    const child = execFile(
       exe,
       args,
       {
@@ -55,6 +57,8 @@ function run(
         resolve({ code: err ? Number((err as any).code) : 0, stdout: String(stdout || ""), stderr: String(stderr || "") });
       }
     );
+    activeChildren.add(child);
+    child.on("close", () => activeChildren.delete(child));
   });
 }
 
@@ -187,5 +191,21 @@ export const wmcpInstaller = {
       inFlight = null;
     });
     return inFlight;
+  },
+
+  /** 应用退出时中止仍在进行的安装：uv/powershell 是独立进程，不清理会继续在后台下载 */
+  cancel(): void {
+    for (const child of activeChildren) {
+      try {
+        if (process.platform === "win32" && child.pid) {
+          spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+        } else {
+          child.kill();
+        }
+      } catch {
+        /* ignore */
+      }
+    }
+    activeChildren.clear();
   },
 };

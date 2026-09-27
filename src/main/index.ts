@@ -12,6 +12,7 @@ import { orchestrator } from "./orchestrator";
 import { realtimeClient } from "./realtime";
 import { mcpClient } from "./mcp";
 import { externalMcp } from "./mcp-external";
+import { wmcpInstaller } from "./wmcp-installer";
 import { visionManager } from "./vision";
 import { desktopController } from "./desktop-control";
 import { armEmergencyStop, disposeEmergencyStop, trigger as triggerEmergencyStop } from "./emergency-stop";
@@ -634,6 +635,7 @@ app.on("before-quit", () => {
   desktopController.destroy();
   mcpClient.stop();
   externalMcp.stopAll();
+  wmcpInstaller.cancel();
   realtimeClient.dispose();
 });
 
