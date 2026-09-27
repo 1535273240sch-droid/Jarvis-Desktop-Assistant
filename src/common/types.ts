@@ -284,6 +284,14 @@ export interface JarvisConfig {
   appProfiles?: AppProfile[];
   /** 悬浮球主题（siri=经典默认；frost/opal/blueDrop/refractiveBlob/particleRibbon） */
   orbTheme?: string;
+  /** 是否启用 AI 唱歌（生成歌曲并播放），默认 true */
+  musicEnabled?: boolean;
+  /** 音乐生成模型 ID（默认 stepaudio-3-music-preview） */
+  musicModel?: string;
+  /** 音乐生成接口地址（默认 https://api.stepfun.com） */
+  musicBaseUrl?: string;
+  /** 音乐生成专属 API Key（可选，为空则沿用主 apiKey） */
+  musicApiKey?: string;
 }
 
 /* ------------------------------------------------------------------ */
@@ -358,6 +366,9 @@ export const IPC = {
   // —— 音色 ——
   VOICE_LIST: "voice:list",
   VOICE_VALIDATE: "voice:validate",
+
+  // —— AI 唱歌（主 → 渲染：生成的歌曲音频，base64 mp3） ——
+  MUSIC_PLAY: "music:play",
 
   // —— 外部 MCP ——
   MCP_EXT_STATUS: "mcp-ext:status",

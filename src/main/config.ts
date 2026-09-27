@@ -171,6 +171,10 @@ export const DEFAULT_CONFIG: JarvisConfig = {
   ],
   // 悬浮球主题：siri=经典默认；其余为用户提供的 5 套主题（generate-orb 注入）
   orbTheme: "siri",
+  // AI 唱歌：生成歌曲并播放。模型 ID 可配置，preview 版存在下线风险
+  musicEnabled: true,
+  musicModel: "stepaudio-3-music-preview",
+  musicBaseUrl: "https://api.stepfun.com",
 };
 
 // [secret-guard patch] 外部 MCP 服务器配置的脱敏与还原
@@ -390,6 +394,9 @@ class ConfigManager {
       apiKeyPresent: c.apiKey.length > 0,
       visionApiKey: c.visionApiKey ? `***${c.visionApiKey.slice(-4)}` : "",
       visionApiKeyPresent: Boolean(c.visionApiKey && c.visionApiKey.length > 0),
+      // 音乐专属 Key 同样只下发脱敏视图，避免经 CONFIG_GET 泄露到渲染进程
+      musicApiKey: c.musicApiKey ? `***${c.musicApiKey.slice(-4)}` : "",
+      musicApiKeyPresent: Boolean(c.musicApiKey && c.musicApiKey.length > 0),
       // [secret-guard patch] 外部 MCP 服务器配置（env 与 args 中的密钥）不下发明文
       mcpServers: redactServerSecrets(c.mcpServers),
     };

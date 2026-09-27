@@ -14,6 +14,7 @@ import { safetyManager } from "./safety";
 import { orbController } from "./orb-control";
 import { configManager } from "./config";
 import { memoryStore } from "./memory";
+import { musicStudio } from "./music";
 import { taskRunner } from "./task-runner";
 import { taskArtifacts } from "./task-artifacts";
 import { onEmergencyStopInterrupt } from "./emergency-stop";
@@ -296,6 +297,29 @@ const BUILTIN_TOOLS = [
           approve: { type: "boolean", description: "用户是否批准" },
         },
         required: ["taskId", "requestId", "approve"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "sing_song",
+      description:
+        "生成一首歌并立即在 Jarvis 中播放。用户说「想听歌」「唱首歌」「给我唱一首」「来点音乐」「生成一首歌」等时**必须**用这个工具，" +
+        "不要只是口头答应或说自己不会唱。把用户的话转写成 caption（曲风 + 人声 + 情绪 + 节奏，例如「轻快的流行女声，温暖治愈，中速」）；" +
+        "用户提供了歌词就放进 lyrics（可带 [Verse 1]/[Chorus 1] 结构标签）；只想要纯音乐时 instrumental=true（此时不要传 lyrics）。" +
+        "注意：生成一首完整歌曲需要 1~3 分钟，调用前请先用一句话告诉用户你正在为他创作，不要反复催促。",
+      parameters: {
+        type: "object",
+        properties: {
+          caption: {
+            type: "string",
+            description: "歌曲风格描述：曲风 + 人声 + 情绪 + 节奏，中英文均可，例如「抒情的民谣男声，略带伤感，慢速」",
+          },
+          lyrics: { type: "string", description: "可选歌词，可带 [Verse 1]/[Chorus 1] 结构标签；纯音乐时不要填" },
+          instrumental: { type: "boolean", description: "是否只要纯音乐（无人声），默认 false" },
+        },
+        required: ["caption"],
       },
     },
   },
@@ -1090,6 +1114,47 @@ class Orchestrator {
         return r.ok
           ? { ok: true, output: `已${args.approve ? "批准" : "拒绝"}该确认项。` }
           : { ok: false, output: r.reason || "答复失败。" };
+      }
+
+      case "sing_song": {
+        if (configManager.get().musicEnabled === false) {
+          return {
+            ok: false,
+            output: "音乐功能当前已在设置中关闭。请让用户在「设置 → AI 唱歌」中开启后再试。",
+          };
+        }
+        const caption = String(args.caption || "").trim();
+        if (!caption) {
+          return { ok: false, output: "缺少歌曲风格描述（caption），请根据用户的话补全后重试。" };
+        }
+        const instrumental = args.instrumental === true;
+        const lyrics = typeof args.lyrics === "string" ? args.lyrics.trim() : "";
+
+        // 生成是 1~3 分钟的长任务，用 onProgress 让用户实时听到进度，而不是干等
+        const song = await musicStudio.createSong({
+          caption,
+          lyrics: lyrics || undefined,
+          instrumental,
+          onProgress: (msg) => this.notifySystem(`🎵 ${msg}`),
+        });
+        if (!song.ok || !song.audioBase64) {
+          return {
+            ok: false,
+            output: `歌曲生成失败：${song.reason || "未知原因"}。请如实告知用户，不要声称已经生成。`,
+          };
+        }
+
+        const title = song.caption || caption;
+        // 推给渲染层用 Web Audio 播放（球体频谱会随之律动）
+        this.broadcast(IPC.MUSIC_PLAY, { audioBase64: song.audioBase64, mime: "audio/mpeg", title });
+        const lyricSummary = song.lyrics ? song.lyrics.replace(/\s+/g, " ").slice(0, 120) : "（纯音乐，无歌词）";
+        return {
+          ok: true,
+          output:
+            `歌曲已生成并开始在 Jarvis 中播放。风格：${title}；歌词摘要：${lyricSummary}。` +
+            (song.filePath ? `音频文件已保存到：${song.filePath}。` : "") +
+            `请用一句话告诉用户「歌已经生成并开始播放」。`,
+        };
       }
 
       default:

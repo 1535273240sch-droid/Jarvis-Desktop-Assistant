@@ -59,6 +59,8 @@ const panelApi = {
   onAudioChunkDown: (cb: Listener) => on("audio:chunk-down", cb),
   onAudioFlush: (cb: Listener) => on("audio:flush", cb),
   onAudioState: (cb: Listener) => on("audio:state", cb),
+  // 生成的歌曲音频（base64 mp3），由面板解码后播放
+  onMusicPlay: (cb: Listener) => on("music:play", cb),
 
   // 工具确认
   onConfirmRequest: (cb: Listener) => on("tool:confirm-request", cb),
