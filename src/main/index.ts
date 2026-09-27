@@ -4,10 +4,11 @@ import * as fs from "node:fs";
 import { registerAppSchemePrivileges, setupProtocolHandler } from "./protocol";
 import { logger } from "./logger";
 import { windowStore } from "./store";
-import { configManager } from "./config";
+import { configManager, clampOrbSize } from "./config";
 import { safetyManager } from "./safety";
 import { stateMachine } from "./state";
 import { orbController } from "./orb-control";
+import { orbSizeManager } from "./orb-size";
 import { orchestrator } from "./orchestrator";
 import { realtimeClient } from "./realtime";
 import { mcpClient } from "./mcp";
@@ -60,7 +61,10 @@ let tray: Tray | null = null;
 
 /** 球体悬浮窗：透明、无边框、置顶、可拖动（点击穿透由页面内脚本控制） */
 function createOrbWindow(): BrowserWindow {
-  const bounds = windowStore.getValidatedBounds();
+  // 配置里的 orbSize 优先于 store 里的旧尺寸（覆盖旧值），位置仍沿用已保存的位置。
+  const cfgSize = configManager.get().orbSize;
+  const sizeOverride = cfgSize !== undefined ? clampOrbSize(cfgSize) : undefined;
+  const bounds = windowStore.getValidatedBounds(sizeOverride);
   const win = new BrowserWindow({
     x: bounds.x,
     y: bounds.y,
@@ -525,6 +529,11 @@ app.whenReady().then(async () => {
   // 2) 窗口
   orbWindow = createOrbWindow();
   orbController.attach(orbWindow);
+  // 2b) 悬浮球尺寸：应用配置里的基准尺寸；订阅状态机以支持「随状态自适应」
+  orbSizeManager.attach(orbWindow);
+  orbSizeManager.init(configManager.get().orbSize, configManager.get().orbAutoScale ?? false);
+  stateMachine.on("change", (e: { to: AssistantState }) => orbSizeManager.onStateChanged(e.to));
+  orbSizeManager.onStateChanged(stateMachine.getState());
   panelWindow = createPanelWindow();
   panelWindow.once("ready-to-show", () => panelWindow?.show());
 

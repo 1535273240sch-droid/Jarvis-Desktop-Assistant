@@ -5,6 +5,18 @@ import { app } from "electron";
 import { logger } from "./logger";
 import type { JarvisConfig } from "../common/types";
 
+/** 悬浮球尺寸允许范围（像素）。窗口 resizable:false，尺寸只由代码设置，此处钳制非法值。 */
+export const ORB_SIZE_MIN = 80;
+export const ORB_SIZE_MAX = 400;
+export const ORB_SIZE_DEFAULT = 260;
+
+/** 把任意输入钳制到合法的球体尺寸区间；非数字回落默认值 */
+export function clampOrbSize(v: unknown): number {
+  const n = Math.round(Number(v));
+  if (!Number.isFinite(n)) return ORB_SIZE_DEFAULT;
+  return Math.min(ORB_SIZE_MAX, Math.max(ORB_SIZE_MIN, n));
+}
+
 /**
  * 获取系统推荐的安全工作目录作为默认白名单
  *
@@ -171,6 +183,9 @@ export const DEFAULT_CONFIG: JarvisConfig = {
   ],
   // 悬浮球主题：siri=经典默认；其余为用户提供的 5 套主题（generate-orb 注入）
   orbTheme: "siri",
+  // 悬浮球基准尺寸与「随状态自适应」开关（默认关闭，避免无预期地改变用户看到的球）
+  orbSize: ORB_SIZE_DEFAULT,
+  orbAutoScale: false,
 };
 
 // [secret-guard patch] 外部 MCP 服务器配置的脱敏与还原

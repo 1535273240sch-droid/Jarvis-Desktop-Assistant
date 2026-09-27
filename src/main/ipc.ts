@@ -3,6 +3,7 @@ import { logger } from "./logger";
 import { configManager } from "./config";
 import { safetyManager } from "./safety";
 import { orbController } from "./orb-control";
+import { orbSizeManager } from "./orb-size";
 import { orchestrator } from "./orchestrator";
 import { realtimeClient } from "./realtime";
 import { mcpClient } from "./mcp";
@@ -74,6 +75,16 @@ export function registerIpcHandlers(deps: Deps): void {
     if (!win) return false;
     orbController.attachTarget(win);
     return orbController.setAudioBands(bands as any);
+  });
+
+  // 悬浮球尺寸：设置基准尺寸（保持球心、持久化、广播）。窗口 resizable:false，
+  // 尺寸只能经此通道由代码设置，用户无法拖边框。
+  ipcMain.handle(IPC.ORB_SET_SIZE, async (_e, size: number) => {
+    const win = deps.getOrbWindow();
+    if (!win || win.isDestroyed()) return { ok: false, size: null };
+    orbSizeManager.attach(win);
+    const applied = orbSizeManager.setBase(size);
+    return { ok: true, size: applied };
   });
 
   /* ---------------- 窗口交互 ---------------- */
@@ -220,6 +231,14 @@ export function registerIpcHandlers(deps: Deps): void {
       // 绝不把 Key 写进审计
       apiKeyChanged: safe.apiKey !== undefined,
     });
+
+    // 悬浮球尺寸 / 自适应开关：配置落盘后立即同步到窗口（保持球心）
+    const orbWin = deps.getOrbWindow();
+    if (orbWin && !orbWin.isDestroyed()) {
+      orbSizeManager.attach(orbWin);
+      if (safe.orbSize !== undefined) orbSizeManager.setBase(safe.orbSize);
+      if (safe.orbAutoScale !== undefined) orbSizeManager.setAutoScale(Boolean(safe.orbAutoScale));
+    }
 
     // 悬浮球主题变更：热重载球体页面（构建期已注入全部主题）
     if (typeof safe.orbTheme === "string" && safe.orbTheme && safe.orbTheme !== prevOrbTheme) {
