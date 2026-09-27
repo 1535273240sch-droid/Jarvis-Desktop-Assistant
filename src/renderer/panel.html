@@ -667,6 +667,39 @@
         </div>
       </div>
     </details>
+
+    <details class="settings" id="tasksPanel">
+      <summary><span class="chev">▸</span> 桌面任务（跨软件长任务）</summary>
+      <div class="body">
+        <div class="row">
+          <button id="btnTaskRefresh">刷新任务</button>
+          <button id="btnStopAllTasks" class="danger">停止所有桌面任务</button>
+        </div>
+        <div class="hint">「停止所有桌面任务」等同全局急停：排队任务立即取消，运行中的动作在当前不可中断调用结束后收敛（界面会标注），不会继续点击或发送。</div>
+        <div id="taskList"></div>
+
+        <div class="field">
+          <label>目标软件档案（编码 Agent / 微信等）</label>
+          <textarea id="appProfilesJson" rows="6" placeholder='[{"id":"custom-agent","displayName":"我的编码 Agent","processNames":["code"],"titleIncludes":["Visual Studio Code"],"runningMarkers":[],"doneMarkers":[],"submitKeys":"enter","resultExtract":"uia_text","enabled":true}]'></textarea>
+          <div class="row">
+            <button id="btnProfilesSave" class="primary">保存档案</button>
+            <button id="btnProfilesLoad">重新加载</button>
+          </div>
+          <div class="hint">processNames=进程名（如 code / wechat），titleIncludes=窗口标题包含的关键字，doneMarkers=完成判据关键字，submitKeys=提交按键。Jarvis 不内置任何 Agent 产品 —— 目标窗口由你自己指定。</div>
+        </div>
+
+        <div class="field">
+          <label>能力授权（撤回后重启不会自动恢复）</label>
+          <div id="authzBox"></div>
+          <div class="row">
+            <button id="btnAuthzGrantAll">授权屏幕+键鼠</button>
+            <button id="btnAuthzGrantSend">授权对外发送（草稿/消息类）</button>
+            <button id="btnAuthzRevokeAll" class="danger">全部撤回</button>
+          </div>
+          <div class="hint">屏幕录制 / 鼠标 / 键盘 / 对外发送是分开的授权项。对外发送只影响草稿类任务的生成确认；即便授权，微信消息也只生成草稿，发送由你手动完成。急停：Ctrl+Alt+X。</div>
+        </div>
+      </div>
+    </details>
   </footer>
 
   <dialog id="confirmDlg">
@@ -1663,6 +1696,209 @@ $('btnClearDiag').onclick = async () => {
   loadDiag();
 };
 
+/* ---------------- 桌面任务（跨软件长任务） ---------------- */
+
+const TASK_STATUS_LABEL = {
+  queued: '排队中', running: '运行中', waiting_user: '等待你处理',
+  succeeded: '已完成', failed: '失败', cancelled: '已取消',
+};
+const TASK_STATUS_COLOR = {
+  queued: '#8a93a6', running: '#4da3ff', waiting_user: '#ffb020',
+  succeeded: '#3ecf8e', failed: '#ff5c5c', cancelled: '#8a93a6',
+};
+const KIND_LABEL = { browser_research: '浏览器搜索整理', coding_agent: '指挥编码 Agent', wechat_draft: '微信草稿' };
+
+let taskCache = [];
+
+function taskActionButton(t) {
+  const b = [];
+  if (t.status === 'waiting_user' || t.status === 'queued') b.push(['resume', '继续']);
+  if (t.status === 'running' || t.status === 'queued') b.push(['pause', '暂停']);
+  if (!['succeeded', 'failed', 'cancelled'].includes(t.status)) b.push(['cancel', '取消']);
+  if (t.status === 'failed' || t.status === 'cancelled') b.push(['retry', '重试']);
+  return b;
+}
+
+function renderTasks() {
+  const box = $('taskList');
+  if (!taskCache.length) {
+    box.innerHTML = '<div class="hint">当前没有任务。对 Jarvis 说「搜索X并整理几种方案」「让我的 Agent 分析某仓库」「给某人发文字图片（草稿）」即可创建。</div>';
+    return;
+  }
+  box.innerHTML = taskCache.map((t) => {
+    const steps = (t.steps || []).map((s, i) => {
+      const mark = { done: '✅', running: '⏳', failed: '❌', waiting_user: '🖐', skipped: '⏭', pending: '•' }[s.status] || '•';
+      return '<div style="margin:2px 0 2px 12px">' + mark + ' ' + esc(s.title) +
+        (s.observation ? '<span style="opacity:.65"> — ' + esc(String(s.observation).slice(0, 120)) + '</span>' : '') +
+        (s.error ? '<span style="color:#ff5c5c"> ' + esc(s.error.slice(0, 120)) + '</span>' : '') + '</div>';
+    }).join('');
+    const btns = taskActionButton(t).map(([act, label]) =>
+      '<button data-task="' + t.taskId + '" data-act="' + act + '" style="padding:1px 8px">' + label + '</button>').join(' ');
+    const confirmHtml = t.confirm
+      ? '<div style="margin:6px 0;padding:8px;border:1px solid #ffb020;border-radius:8px;background:rgba(255,176,32,.08)">' +
+        '<b>🖐 ' + esc(t.confirm.title) + '</b><div style="margin:4px 0;word-break:break-all">' + esc(t.confirm.detail) + '</div>' +
+        (t.confirm.payload
+          ? '<div style="margin:4px 0">收件人：<b>' + esc(t.confirm.payload.contact) + '</b></div>' +
+            '<div style="margin:4px 0;white-space:pre-wrap;word-break:break-all">正文：' + esc(t.confirm.payload.text) + '</div>' +
+            (t.confirm.payload.images && t.confirm.payload.images.length
+              ? '<div style="margin:4px 0">图片：<br>' + t.confirm.payload.images.map((p) => '• ' + esc(p)).join('<br>') + '</div>'
+              : '') +
+            (t.confirm.payload.warnings && t.confirm.payload.warnings.length
+              ? '<div style="margin:4px 0;color:#ffb020">⚠ ' + t.confirm.payload.warnings.map((w) => esc(w)).join('；') + '</div>'
+              : '')
+          : '') +
+        '<div class="row" style="margin-top:6px">' +
+        '<button data-task="' + t.taskId + '" data-act="confirm" data-req="' + t.confirm.requestId + '" data-ok="1" class="primary" style="padding:1px 8px">确认</button>' +
+        '<button data-task="' + t.taskId + '" data-act="confirm" data-req="' + t.confirm.requestId + '" data-ok="0" class="danger" style="padding:1px 8px">取消</button>' +
+        '</div></div>'
+      : '';
+    const resultHtml = t.result
+      ? '<details style="margin-top:4px"><summary>查看结果</summary><div style="white-space:pre-wrap;word-break:break-all;margin:4px 0">' + esc(t.result.summary) + '</div>' +
+        (t.result.artifacts && t.result.artifacts.length
+          ? '<div>产物：' + t.result.artifacts.map((f) =>
+              '<button data-task="' + t.taskId + '" data-act="read" data-file="' + esc(f) + '" style="padding:0 6px">' + esc(f) + '</button>').join(' ') + '</div>'
+          : '') + '</details>'
+      : '';
+    return '<div style="margin:8px 0;padding:8px;border:1px solid #2a2f3a;border-radius:10px">' +
+      '<div><b>' + esc(KIND_LABEL[t.kind] || t.kind) + '</b> <span style="color:' + TASK_STATUS_COLOR[t.status] + '">[' + TASK_STATUS_LABEL[t.status] + ']</span> ' +
+      '<span style="opacity:.6">' + esc(t.taskId) + '</span></div>' +
+      '<div style="margin:2px 0;opacity:.85">' + esc(t.goal.slice(0, 120)) + '</div>' +
+      (t.progressNote ? '<div style="opacity:.6">进度：' + esc(t.progressNote.slice(0, 160)) + '</div>' : '') +
+      (t.error ? '<div style="color:#ff5c5c">' + esc(t.error.slice(0, 200)) + '</div>' : '') +
+      '<div style="margin:4px 0">' + steps + '</div>' + confirmHtml + resultHtml +
+      (btns ? '<div class="row" style="margin-top:6px">' + btns + '</div>' : '') +
+      '</div>';
+  }).join('');
+  // 绑定按钮事件（innerHTML 重建后需要重新挂）
+  box.querySelectorAll('button[data-task]').forEach((btn) => {
+    btn.onclick = async () => {
+      const taskId = btn.getAttribute('data-task');
+      const act = btn.getAttribute('data-act');
+      try {
+        if (act === 'read') {
+          const file = btn.getAttribute('data-file');
+          let page = Number(btn.getAttribute('data-page') || 1);
+          const pg = await api.taskResultPage({ taskId, file, page });
+          if (!pg) { toast('读取产物失败'); return; }
+          const more = pg.page < pg.total
+            ? '\n\n<button data-task="' + taskId + '" data-act="read" data-file="' + file + '" data-page="' + (pg.page + 1) + '">下一页</button>'
+            : '';
+          box.innerHTML = '<div style="padding:8px;border:1px solid #2a2f3a;border-radius:10px"><b>' + esc(file) + '（第 ' + pg.page + '/' + pg.total + ' 页）</b>' +
+            '<div style="white-space:pre-wrap;word-break:break-all;margin:6px 0">' + esc(pg.content) + '</div>' + more +
+            '<div class="row"><button id="btnTaskBack">返回任务列表</button></div></div>';
+          const nb = document.getElementById('btnTaskBack');
+          if (nb) nb.onclick = () => renderTasks();
+          const np = box.querySelector('button[data-page]');
+          if (np) np.onclick = btn.onclick;
+          return;
+        }
+        const payload = { taskId, action: act };
+        if (act === 'confirm') {
+          payload.requestId = btn.getAttribute('data-req');
+          payload.approve = btn.getAttribute('data-ok') === '1';
+        }
+        const r = await api.taskAction(payload);
+        if (r && r.ok === false) toast('操作失败：' + (r.reason || '未知'));
+        await refreshTasks();
+      } catch (e) {
+        toast('操作失败：' + (e && e.message ? e.message : e));
+      }
+    };
+  });
+}
+
+async function refreshTasks() {
+  try {
+    const d = await api.taskList();
+    taskCache = (d && d.tasks) || [];
+    renderTasks();
+  } catch (e) {
+    $('taskList').innerHTML = '<div class="hint">任务列表读取失败。</div>';
+  }
+}
+
+api.onTaskEvent((ev) => {
+  if (!ev || !ev.task) return;
+  const i = taskCache.findIndex((t) => t.taskId === ev.task.taskId);
+  if (i >= 0) taskCache[i] = ev.task;
+  else taskCache.unshift(ev.task);
+  renderTasks();
+});
+
+$('btnTaskRefresh').onclick = () => { refreshTasks(); toast('已刷新'); };
+$('btnStopAllTasks').onclick = async () => {
+  if (!confirm('确定停止所有桌面任务？（等同全局急停，队列取消、运行中的动作在当前调用结束后收敛）')) return;
+  const r = await api.stopAllTasks();
+  toast(r && r.stopped ? '已触发急停：所有桌面任务停止' : '已处理');
+  await refreshTasks();
+};
+
+/* ---------------- 目标软件档案 / 能力授权 ---------------- */
+
+async function loadProfiles() {
+  try {
+    const d = await api.appProfilesGet();
+    $('appProfilesJson').value = JSON.stringify((d && d.profiles) || [], null, 2);
+  } catch (e) {
+    $('appProfilesJson').value = '[]';
+  }
+}
+
+$('btnProfilesLoad').onclick = () => { loadProfiles(); toast('已重新加载'); };
+$('btnProfilesSave').onclick = async () => {
+  let profiles;
+  try {
+    profiles = JSON.parse($('appProfilesJson').value);
+  } catch (e) {
+    toast('JSON 格式有误：' + e.message);
+    return;
+  }
+  const r = await api.appProfilesSet(profiles);
+  if (r && r.ok) {
+    $('appProfilesJson').value = JSON.stringify(r.profiles, null, 2);
+    toast('档案已保存');
+  } else toast('保存失败');
+};
+
+const CAP_LABEL = {
+  'screen-capture': '屏幕录制', 'mouse-control': '鼠标控制',
+  'keyboard-control': '键盘控制', 'external-send': '对外发送（草稿/消息）',
+};
+
+async function loadAuthz() {
+  try {
+    const st = await api.authzGet();
+    const revoked = st.state === 'revoked' ? st.scope : [];
+    const active = st.state === 'granted' || st.state === 'partial' ? st.scope : [];
+    const caps = ['screen-capture', 'mouse-control', 'keyboard-control', 'external-send'];
+    $('authzBox').innerHTML = caps.map((c) => {
+      const on = active.includes(c) && !revoked.includes(c);
+      const wasRevoked = revoked.includes(c);
+      return '<div style="margin:2px 0">• ' + esc(CAP_LABEL[c]) + '：<b style="color:' + (on ? '#3ecf8e' : '#8a93a6') + '">' +
+        (on ? '已授权' : wasRevoked ? '已撤回（持久生效）' : '未授权') + '</b></div>';
+    }).join('') + (st.state === 'none' ? '<div class="hint">首次使用：点击下方按钮完成授权后，桌面能力才会生效。</div>' : '');
+  } catch (e) {
+    $('authzBox').textContent = '授权状态读取失败。';
+  }
+}
+
+$('btnAuthzGrantAll').onclick = async () => {
+  await api.authzGrant(['screen-capture', 'mouse-control', 'keyboard-control']);
+  toast('已授权屏幕+键鼠');
+  loadAuthz();
+};
+$('btnAuthzGrantSend').onclick = async () => {
+  await api.authzGrant(['external-send']);
+  toast('已授权对外发送（发送仍需在微信手动完成）');
+  loadAuthz();
+};
+$('btnAuthzRevokeAll').onclick = async () => {
+  if (!confirm('确定撤回全部能力授权？（撤回持久生效，重启后也不会自动恢复）')) return;
+  await api.authzRevoke();
+  toast('已全部撤回');
+  loadAuthz();
+};
+
 /* ---------------- 初始化 ---------------- */
 
 setState('idle');
@@ -1671,8 +1907,12 @@ loadMemory();
 loadDiag();
 loadMcpPresets();
 loadMcpExt();
+refreshTasks();
+loadProfiles();
+loadAuthz();
 setInterval(loadConfig, 8000);
 setInterval(loadDiag, 6000);
+setInterval(refreshTasks, 15000);
 </script>
 </body>
 </html>

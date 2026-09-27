@@ -14,10 +14,12 @@ import { safetyManager } from "./safety";
 import { orbController } from "./orb-control";
 import { configManager } from "./config";
 import { memoryStore } from "./memory";
+import { taskRunner } from "./task-runner";
+import { taskArtifacts } from "./task-artifacts";
 import { onEmergencyStopInterrupt } from "./emergency-stop";
-import { isAuthorized, ensureAutoAuthorized } from "./authorization";
+import { isAuthorized } from "./authorization";
 import { IPC } from "../common/types";
-import type { AssistantState, SessionStatus, ToolCallView } from "../common/types";
+import type { AssistantState, SessionStatus, ToolCallView, TaskKind } from "../common/types";
 
 /**
  * 中枢编排器：把「语音 / 文本 -> 模型 -> 工具 -> 结果回注 -> 语音回复」
@@ -222,6 +224,81 @@ const BUILTIN_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "create_desktop_task",
+      description:
+        "创建一个跨软件的桌面长任务（由任务引擎逐步执行并验收，不要用单次工具调用硬凑）。三种类型：" +
+        "browser_research=浏览器搜索并整理资料（用户说「搜索X并整理几种方案」）；" +
+        "coding_agent=把仓库分析/规划任务交给用户配置的编码 Agent（用户说「打开我的Agent让它看这个仓库做规划」）；" +
+        "wechat_draft=生成微信消息草稿（用户给出联系人、图片和文字）。创建后向用户简要说明任务已排队。",
+      parameters: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["browser_research", "coding_agent", "wechat_draft"], description: "任务类型" },
+          goal: { type: "string", description: "用户的原始目标（原话或轻度整理）" },
+          query: { type: "string", description: "browser_research：搜索关键词" },
+          engine: { type: "string", enum: ["bing", "baidu", "google"], description: "browser_research：搜索引擎，默认 bing" },
+          count: { type: "number", description: "browser_research：要读取的页面数，默认 3（至少 2）" },
+          repoUrl: { type: "string", description: "coding_agent：仓库 URL（用户说「这个仓库」时必须先问清或复述）" },
+          instruction: { type: "string", description: "coding_agent：交给 Agent 的具体要求，默认「分析并给出改进规划」" },
+          profileId: { type: "string", description: "coding_agent：用户配置的 Agent 档案 ID（不知道就不填）" },
+          contact: { type: "string", description: "wechat_draft：联系人/群名称" },
+          text: { type: "string", description: "wechat_draft：要发送的文字" },
+          images: { type: "array", items: { type: "string" }, description: "wechat_draft：图片的完整路径列表" },
+        },
+        required: ["kind", "goal"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "get_task_status",
+      description: "查询桌面任务的状态与进度。用户问「任务怎么样了」「搜索做完了吗」时调用。不传 taskId 返回最近任务列表。",
+      parameters: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "任务 ID；缺省返回最近的几个任务" },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_task_result",
+      description: "分页读取桌面任务保存的完整结果/产物（长报告不会被截断丢失）。先 get_task_status 拿到任务与产物名。",
+      parameters: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "任务 ID" },
+          file: { type: "string", description: "产物文件名，如 summary.md、agent-report.txt；缺省列出全部产物" },
+          page: { type: "number", description: "页码（从 1 开始），每页约 4000 字符" },
+        },
+        required: ["taskId"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "respond_task_confirm",
+      description:
+        "代表用户答复任务面板里的待确认项（仅当用户已明确口头/文字批准或拒绝时才可调用；不要代替用户做判断）。" +
+        "注意：微信草稿的「确认」只是保存草稿，发送永远由用户在微信中手动完成。",
+      parameters: {
+        type: "object",
+        properties: {
+          taskId: { type: "string", description: "任务 ID" },
+          requestId: { type: "string", description: "待确认项的 requestId（来自 get_task_status 的 confirm 字段）" },
+          approve: { type: "boolean", description: "用户是否批准" },
+        },
+        required: ["taskId", "requestId", "approve"],
+      },
+    },
+  },
 ];
 
 /** WMO 天气代码 -> 中文描述（Open-Meteo 使用 WMO 4677 编码） */
@@ -403,6 +480,14 @@ class Orchestrator {
     // 外部 MCP：就绪后把工具一起补发
     externalMcp.on("tools", () => {
       this.pushToolsToModel();
+    });
+
+    // —— 桌面任务：关键状态同步到聊天流（进度详情在任务面板；不占六态看门狗） ——
+    taskRunner.on("task", (ev: { task: { taskId: string; kind: string; status: string; progressNote?: string; error?: string; result?: { summary: string } }; change: string; message?: string }) => {
+      if (ev.change === "status" || ev.change === "result") {
+        const tail = ev.task.error ? `（${ev.task.error.slice(0, 160)}）` : ev.task.result ? `：${ev.task.result.summary.slice(0, 200)}…` : "";
+        this.broadcast(IPC.CHAT_MESSAGE, { systemNotice: `🛰 桌面任务 ${ev.task.taskId}（${ev.task.kind}）→ ${ev.task.status}${tail}` });
+      }
     });
   }
 
@@ -734,9 +819,6 @@ class Orchestrator {
       }
 
       case "close_current_window": {
-        if (!isAuthorized("keyboard-control")) {
-          ensureAutoAuthorized();
-        }
         const win = await visionManager.getActiveWindow();
         if (!win) return { ok: false, output: "当前没有可操作的前台窗口（焦点可能在桌面）。" };
         const cfgClose = configManager.get();
@@ -905,6 +987,104 @@ class Orchestrator {
             ? `已写入长期记忆：「${fact}」。该信息重启后仍然有效。请简短确认。`
             : `这条内容之前已经记住了（「${fact}」），未重复写入。请简短确认。`,
         };
+      }
+
+      case "create_desktop_task": {
+        const kind = String(args.kind || "") as TaskKind;
+        if (!["browser_research", "coding_agent", "wechat_draft"].includes(kind)) {
+          return { ok: false, output: "任务类型无效，必须为 browser_research / coding_agent / wechat_draft。" };
+        }
+        // 微信草稿：进入任务前先核验外部发送授权（撤回/未授权直接拒绝）
+        if (kind === "wechat_draft" && !isAuthorized("external-send")) {
+          return {
+            ok: false,
+            output:
+              "「对外发送」能力尚未授权（这是独立于键鼠的授权项）。请用户在面板「设置 → 能力授权」中开启后重试；" +
+              "即便授权，生成的也只是草稿，发送仍需用户在微信中手动完成。",
+          };
+        }
+        const params: Record<string, unknown> = {};
+        for (const k of ["query", "engine", "count", "repoUrl", "instruction", "profileId", "contact", "text"]) {
+          if (args[k] !== undefined) params[k] = args[k];
+        }
+        if (Array.isArray(args.images)) params.images = args.images.map((x) => String(x));
+        const task = taskRunner.createTask({
+          kind,
+          goal: String(args.goal || "").trim() || "（未提供目标描述）",
+          targetApp: typeof args.targetApp === "string" ? args.targetApp : undefined,
+          params,
+          source: "model",
+        });
+        safetyManager.audit("task_created_via_model", { taskId: task.taskId, kind });
+        if (task.status === "failed") return { ok: false, output: `任务未创建：${task.error}` };
+        return {
+          ok: true,
+          output:
+            `桌面任务 ${task.taskId} 已创建并排队（类型 ${kind}，目标软件 ${task.targetApp}）。` +
+            `任务引擎会逐步执行并在面板展示进度；完成后可用 get_task_status / read_task_result 查看结果。` +
+            `不要用「已创建」当作「已完成」向用户汇报。`,
+        };
+      }
+
+      case "get_task_status": {
+        if (args.taskId) {
+          const t = taskRunner.get(String(args.taskId));
+          if (!t) return { ok: false, output: `任务 ${args.taskId} 不存在。` };
+          const steps = t.steps
+            .map((s, i) => `${i + 1}. ${s.title} [${s.status}]${s.observation ? ` 观察: ${s.observation.slice(0, 120)}` : ""}`)
+            .join("\n");
+          return {
+            ok: true,
+            output:
+              `任务 ${t.taskId}（${t.kind}）状态 ${t.status}` +
+              `${t.progressNote ? `；进度：${t.progressNote}` : ""}${t.error ? `；错误：${t.error}` : ""}\n${steps}` +
+              (t.confirm ? `\n待确认项：requestId=${t.confirm.requestId}，${t.confirm.title}` : "") +
+              (t.result ? `\n结果摘要：${t.result.summary.slice(0, 600)}` : ""),
+          };
+        }
+        const list = taskRunner
+          .list()
+          .slice(0, 5)
+          .map((t) => `${t.taskId}（${t.kind}）${t.status}${t.result ? "，有结果" : ""}：${t.goal.slice(0, 50)}`);
+        return { ok: true, output: list.length ? `最近任务：\n${list.join("\n")}` : "当前没有任务。" };
+      }
+
+      case "read_task_result": {
+        const t = taskRunner.get(String(args.taskId || ""));
+        if (!t) return { ok: false, output: "任务不存在。" };
+        const files = t.result?.artifacts ?? taskArtifacts.list(t.taskId).map((a) => a.file);
+        if (!args.file) {
+          return {
+            ok: true,
+            output: files.length
+              ? `任务 ${t.taskId} 的产物：${files.join("、")}。用 file 参数分页读取。`
+              : "该任务还没有产物。",
+          };
+        }
+        const file = String(args.file);
+        if (!files.includes(file)) return { ok: false, output: `产物 ${file} 不存在。可用：${files.join("、") || "（无）"}` };
+        const pg = taskArtifacts.readPage(t.taskId, file, Number(args.page) || 1, 4000);
+        if (!pg) return { ok: false, output: `读取 ${file} 失败。` };
+        return {
+          ok: true,
+          output: `【${file} 第 ${pg.page}/${pg.total} 页】\n${pg.content}\n（共 ${pg.total} 页，可用 page 参数继续读取）`,
+        };
+      }
+
+      case "respond_task_confirm": {
+        const taskId = String(args.taskId || "");
+        const requestId = String(args.requestId || "");
+        const t = taskRunner.get(taskId);
+        if (!t || !t.confirm || t.confirm.requestId !== requestId) {
+          return { ok: false, output: "待确认项不存在或已过期。" };
+        }
+        if (t.confirm.kind === "draft_review" && args.approve === true && !isAuthorized("external-send")) {
+          return { ok: false, output: "「对外发送」能力未授权，无法批准草稿流程。请用户在面板中开启授权后重试。" };
+        }
+        const r = taskRunner.respondConfirm(taskId, requestId, args.approve === true);
+        return r.ok
+          ? { ok: true, output: `已${args.approve ? "批准" : "拒绝"}该确认项。` }
+          : { ok: false, output: r.reason || "答复失败。" };
       }
 
       default:

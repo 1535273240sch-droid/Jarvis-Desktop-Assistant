@@ -6,7 +6,7 @@ import { execFile } from "node:child_process";
 import { logger } from "./logger";
 import { configManager } from "./config";
 import { safetyManager } from "./safety";
-import { isAuthorized, ensureAutoAuthorized } from "./authorization";
+import { isAuthorized } from "./authorization";
 import { parseVisionTarget, stripTargetJson, COORDINATE_CONTRACT } from "./vision-target";
 import type { VisionResult } from "../common/types";
 
@@ -95,9 +95,10 @@ class VisionManager {
    * desktopCapturer 不会二次缩放，图像像素与屏幕物理像素一一对应。
    */
   async captureWithMeta(target: "entire_screen" | "active_window" = "entire_screen"): Promise<CaptureMeta> {
-    // 全自动模式：首次调用自动落盘授权，不再中断用户操作
+    // 屏幕录制需用户授权（可在面板撤回且撤回持久生效）；不再自动落盘授权
     if (!isAuthorized("screen-capture")) {
-      ensureAutoAuthorized();
+      safetyManager.audit("vision_capture_unauthorized", { target });
+      throw new Error("屏幕录制能力尚未授权或已被撤回，请在面板「设置 → 能力授权」中开启后重试。");
     }
 
     if (target === "active_window") {

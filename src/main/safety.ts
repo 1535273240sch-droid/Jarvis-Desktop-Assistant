@@ -5,6 +5,9 @@ import { logger } from "./logger";
 import { configManager } from "./config";
 import { IPC } from "../common/types";
 import type { SecurityConfirmRequest, SecurityConfirmResponse } from "../common/types";
+import { redactArgs, redactText, pruneJsonlFile } from "./log-redact";
+import { setCommandAssessor, classifyTool } from "./action-policy";
+import type { ActionClassification } from "./action-policy";
 
 /**
  * 安全与审计。
@@ -109,6 +112,15 @@ class SafetyManager {
     return { level: "low" };
   }
 
+  /**
+   * 按「动作语义」分类一次工具调用（项目书 P0 ActionPolicy）。
+   * 返回的分类含 needsConfirm —— external_send / account_or_payment / unknown
+   * 一律需要独立确认，不受 confirmHighRisk 全局开关豁免（由调用方执行）。
+   */
+  classifyAction(serverName: string, toolName: string, args: Record<string, unknown>): ActionClassification {
+    return classifyTool(serverName, toolName, args);
+  }
+
   /** 该工具调用是否需要人工确认 */
   needsConfirmation(toolName: string, args: Record<string, unknown>): { need: boolean; level: "medium" | "high" | "critical"; label: string } {
     const cfg = configManager.get();
@@ -168,12 +180,12 @@ class SafetyManager {
     });
   }
 
-  /** 写审计日志（JSONL，只追加） */
+  /** 写审计日志（JSONL，只追加）。payload 先做敏感字段脱敏再落盘 */
   audit(event: string, payload: Record<string, unknown>): void {
     const line = JSON.stringify({
       ts: new Date().toISOString(),
       event,
-      ...payload,
+      ...redactArgs(payload) as Record<string, unknown>,
     });
     try {
       fs.appendFileSync(this.auditPath, line + "\n", "utf-8");
@@ -182,7 +194,7 @@ class SafetyManager {
     }
   }
 
-  /** 记录一次工具执行（成功/失败/被拒都要留痕） */
+  /** 记录一次工具执行（成功/失败/被拒都要留痕）。参数与结果预览均脱敏 */
   auditToolCall(
     toolName: string,
     args: Record<string, unknown>,
@@ -192,12 +204,33 @@ class SafetyManager {
   ): void {
     this.audit("tool_call", {
       toolName,
-      args,
+      args: redactArgs(args),
       outcome,
       durationMs,
-      resultPreview: resultPreview ? resultPreview.slice(0, 500) : undefined,
+      resultPreview: resultPreview ? redactText(resultPreview.slice(0, 500)) : undefined,
     });
   }
+
+  /**
+   * 审计日志留存清理：只保留最近 retentionDays 天。
+   * 启动时调用一次；审计文件超过保留期即重写裁剪。
+   */
+  pruneAuditLog(retentionDays: number): { removed: number; kept: number } {
+    try {
+      const r = pruneJsonlFile(this.auditPath, { retentionDays: Math.max(1, retentionDays), maxLines: 200_000 });
+      if (r.removed > 0) logger.info(`[Safety] 审计日志已按 ${retentionDays} 天保留策略清理：移除 ${r.removed} 条，保留 ${r.kept} 条`);
+      return r;
+    } catch (e) {
+      logger.warn("[Safety] 审计日志清理失败:", e);
+      return { removed: 0, kept: 0 };
+    }
+  }
 }
+
+// 把本模块的命令评估器注册给 ActionPolicy（保持 action-policy 零依赖可单测）
+setCommandAssessor((command) => {
+  const r = safetyManager.assessCommand(command);
+  return { level: r.level === "low" ? "low" : r.level };
+});
 
 export const safetyManager = new SafetyManager();

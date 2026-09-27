@@ -12,9 +12,14 @@ import { stateMachine } from "./state";
 import { memoryStore } from "./memory";
 import { externalMcp } from "./mcp-external";
 import { MCP_PRESETS } from "./mcp-presets";
-import { isStopped, reset as resetEmergencyStop } from "./emergency-stop";
+import { isStopped, reset as resetEmergencyStop, trigger as triggerEmergencyStop, getStatus as emergencyStatus } from "./emergency-stop";
+import { taskRunner } from "./task-runner";
+import { taskArtifacts } from "./task-artifacts";
+import { getProfiles, saveProfiles } from "./app-profiles";
+import { getAuthzState, grantAuthorization, revokeAuthorization } from "./authorization";
+import type { Capability } from "./authorization";
 import { IPC } from "../common/types";
-import type { JarvisConfig } from "../common/types";
+import type { JarvisConfig, AppProfile, TaskKind } from "../common/types";
 
 /**
  * IPC 中枢：把渲染进程的请求路由到各主进程模块。
@@ -235,7 +240,7 @@ export function registerIpcHandlers(deps: Deps): void {
 
   /* ---------------- 全局急停 ---------------- */
 
-  ipcMain.handle(IPC.EMERGENCY_STOP_STATUS, async () => ({ stopped: isStopped() }));
+  ipcMain.handle(IPC.EMERGENCY_STOP_STATUS, async () => emergencyStatus());
 
   // 急停是「一次性闩锁」：触发后所有桌面操作都会抛 EMERGENCY_STOP，
   // 若没有这条恢复通路，用户只能重启应用才能重新使用鼠标键盘控制。
@@ -248,6 +253,84 @@ export function registerIpcHandlers(deps: Deps): void {
       p.webContents.send(IPC.CHAT_MESSAGE, { systemNotice: "全局急停已解除，桌面控制恢复可用。" });
     }
     return { ok: true, stopped: isStopped() };
+  });
+
+  /* ---------------- 桌面任务（跨软件长任务） ---------------- */
+
+  ipcMain.handle(IPC.TASK_LIST, async () => ({
+    tasks: taskRunner.list(),
+    busy: taskRunner.isBusy(),
+  }));
+
+  ipcMain.handle(IPC.TASK_CREATE, async (_e, input: { kind: TaskKind; goal: string; params?: Record<string, unknown> }) => {
+    if (!input || !input.kind) return { ok: false, reason: "缺少任务类型" };
+    const t = taskRunner.createTask({
+      kind: input.kind,
+      goal: String(input.goal || ""),
+      params: input.params || {},
+      source: "panel",
+    });
+    return { ok: true, taskId: t.taskId };
+  });
+
+  // action: pause | resume | cancel | retry | confirm
+  ipcMain.handle(IPC.TASK_ACTION, async (_e, payload: { taskId: string; action: string; requestId?: string; approve?: boolean }) => {
+    const { taskId, action } = payload || ({} as any);
+    if (!taskId || !action) return { ok: false, reason: "缺少 taskId/action" };
+    safetyManager.audit("task_action", { taskId, action });
+    switch (action) {
+      case "pause":
+        return taskRunner.pause(taskId);
+      case "resume":
+        return taskRunner.resume(taskId);
+      case "cancel":
+        return taskRunner.cancel(taskId);
+      case "retry":
+        return taskRunner.retry(taskId);
+      case "confirm":
+        if (!payload.requestId) return { ok: false, reason: "缺少 requestId" };
+        return taskRunner.respondConfirm(taskId, payload.requestId, payload.approve === true);
+      default:
+        return { ok: false, reason: `未知操作 ${action}` };
+    }
+  });
+
+  ipcMain.handle(IPC.TASK_RESULT_PAGE, async (_e, payload: { taskId: string; file: string; page?: number }) => {
+    if (!payload?.taskId || !payload.file) return null;
+    return taskArtifacts.readPage(payload.taskId, payload.file, payload.page || 1, 4000);
+  });
+
+  // 「停止所有桌面任务」：与全局急停同一闩锁（A4），按钮位于面板任务区
+  ipcMain.handle(IPC.TASKS_STOP_ALL, async () => {
+    triggerEmergencyStop("面板停止所有桌面任务");
+    return { ok: true, ...emergencyStatus() };
+  });
+
+  /* ---------------- 目标软件档案 ---------------- */
+
+  ipcMain.handle(IPC.APP_PROFILES_GET, async () => ({ profiles: getProfiles() }));
+
+  ipcMain.handle(IPC.APP_PROFILES_SET, async (_e, profiles: AppProfile[]) => {
+    const clean = saveProfiles(Array.isArray(profiles) ? profiles : []);
+    safetyManager.audit("app_profiles_saved", { count: clean.length });
+    return { ok: true, profiles: clean };
+  });
+
+  /* ---------------- 能力授权（撤回持久化） ---------------- */
+
+  ipcMain.handle(IPC.AUTHZ_GET, async () => getAuthzState());
+
+  ipcMain.handle(IPC.AUTHZ_GRANT, async (_e, scope: Capability[]) => {
+    const caps = (Array.isArray(scope) ? scope : []).filter((c) =>
+      ["screen-capture", "mouse-control", "keyboard-control", "external-send"].includes(c)
+    );
+    grantAuthorization(caps);
+    return { ok: true, state: getAuthzState() };
+  });
+
+  ipcMain.handle(IPC.AUTHZ_REVOKE, async (_e, scope?: Capability[]) => {
+    revokeAuthorization(Array.isArray(scope) && scope.length ? scope : undefined);
+    return { ok: true, state: getAuthzState() };
   });
 
   /* ---------------- 长期记忆 ---------------- */

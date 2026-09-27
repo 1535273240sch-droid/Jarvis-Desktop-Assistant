@@ -89,10 +89,16 @@ export interface SecurityConfirmRequest {
     | "terminal_command"
     | "kill_process"
     | "desktop_control"
-    | "config_change";
+    | "config_change"
+    | "external_send";
   title: string;
   target: string;
   explanation: string;
+  /**
+   * 对外发送类确认的完整内容（项目书 P0：通信确认界面必须展示
+   * 准确收件人、完整正文和附件清单；超时与窗口不可见均拒绝）
+   */
+  comm?: { recipient: string; body: string; attachments: string[] };
 }
 
 export interface SecurityConfirmResponse {
@@ -114,6 +120,107 @@ export interface VisionResult {
   /** 截图自身像素尺寸 */
   imageSize?: { width: number; height: number };
 }
+
+/* ------------------------------------------------------------------ */
+/* 桌面任务（跨软件长任务，与六态语音状态分离）                          */
+/* ------------------------------------------------------------------ */
+
+/** 任务状态（项目书 §2.1：queued/running/waiting_user/succeeded/failed/cancelled） */
+export type TaskStatus = "queued" | "running" | "waiting_user" | "succeeded" | "failed" | "cancelled";
+
+/** 任务类型（项目书 §2.2 三条示范流程 + 兜底） */
+export type TaskKind = "browser_research" | "coding_agent" | "wechat_draft";
+
+export interface TaskStep {
+  stepId: string;
+  title: string;
+  status: "pending" | "running" | "done" | "failed" | "skipped" | "waiting_user";
+  /** 执行动作描述 */
+  action?: string;
+  /** 观察证据摘要：窗口标识、UIA 元素或截图区域说明 */
+  observation?: string;
+  /** 验证条件 */
+  verify?: string;
+  error?: string;
+  startedAt?: number;
+  finishedAt?: number;
+}
+
+/** 任务待确认请求（waiting_user 时挂在任务上） */
+export interface TaskConfirmRequest {
+  requestId: string;
+  kind: "action_policy" | "takeover" | "draft_review";
+  title: string;
+  detail: string;
+  /** draft_review 时的草稿内容（联系人/正文/图片清单） */
+  payload?: WechatDraftPayload;
+}
+
+/** 微信草稿（P3 阻塞期唯一交付形态：草稿 + 人工发送，绝不自动发送） */
+export interface WechatDraftPayload {
+  contact: string;
+  text: string;
+  /** 已核验存在的图片绝对路径清单 */
+  images: string[];
+  /** 缺失/可疑项，展示给用户核对 */
+  warnings: string[];
+  createdAt: number;
+}
+
+export interface DesktopTask {
+  taskId: string;
+  kind: TaskKind;
+  /** 用户原始目标 */
+  goal: string;
+  /** 目标软件（展示名 / 配置键） */
+  targetApp: string;
+  steps: TaskStep[];
+  status: TaskStatus;
+  /** 允许的动作语义范围（ActionCategory 列表） */
+  allowedActions: string[];
+  createdAt: number;
+  updatedAt: number;
+  currentStepIndex: number;
+  /** 最近一次观察摘要 */
+  lastObservation?: string;
+  /** 面板可见的进度说明 */
+  progressNote?: string;
+  result?: { summary: string; artifacts: string[] };
+  error?: string;
+  confirm?: TaskConfirmRequest | null;
+}
+
+/** 任务事件（主进程 → 面板） */
+export interface TaskEvent {
+  task: DesktopTask;
+  change: "created" | "step" | "progress" | "status" | "confirm" | "result";
+  message?: string;
+}
+
+/** 用户配置的目标软件档案（项目书 §2.2/P1：不硬编码某个 Agent 产品） */
+export interface AppProfile {
+  id: string;
+  displayName: string;
+  /** 窗口匹配：进程名（不区分大小写，如 "code"、"wechat"、"msedge"） */
+  processNames: string[];
+  /** 窗口匹配：标题包含（任一命中即可） */
+  titleIncludes: string[];
+  /** 启动方式（找不到窗口时使用） */
+  launch?: { kind: "app" | "url"; value: string };
+  /** 运行中判据：窗口文本/快照出现这些字样视为仍在运行 */
+  runningMarkers: string[];
+  /** 完成判据：出现这些字样视为完成 */
+  doneMarkers: string[];
+  /** 提交任务时发送的按键（默认 enter） */
+  submitKeys: string;
+  /** 结果提取方式：UIA 文本快照，或 Ctrl+A/Ctrl+C 剪贴板 */
+  resultExtract: "uia_text" | "clipboard";
+  enabled: boolean;
+}
+
+/* ------------------------------------------------------------------ */
+/* 外部 MCP / 运行时配置                                                */
+/* ------------------------------------------------------------------ */
 
 /** 外部 MCP 服务器配置（stdio 传输） */
 export interface McpServerConfig {
@@ -171,6 +278,10 @@ export interface JarvisConfig {
    * 这些服务器的工具会与内置工具、DesktopCommander 工具一起下发给模型。
    */
   mcpServers?: McpServerConfig[];
+  /** 审计/任务日志保留天数（默认 30，超期在启动时清理） */
+  logRetentionDays?: number;
+  /** 用户配置的目标软件档案（编码 Agent / 微信 / 浏览器等，项目书 §2.2） */
+  appProfiles?: AppProfile[];
 }
 
 /* ------------------------------------------------------------------ */
@@ -251,6 +362,23 @@ export const IPC = {
   MCP_EXT_RELOAD: "mcp-ext:reload",
   MCP_EXT_TEST: "mcp-ext:test",
   MCP_EXT_LIST_PRESETS: "mcp-ext:presets",
+
+  // —— 桌面任务（跨软件长任务） ——
+  TASK_LIST: "task:list",
+  TASK_CREATE: "task:create",
+  TASK_ACTION: "task:action",
+  TASK_EVENT: "task:event",
+  TASK_RESULT_PAGE: "task:result-page",
+  TASKS_STOP_ALL: "tasks:stop-all",
+
+  // —— 目标软件档案 ——
+  APP_PROFILES_GET: "app-profiles:get",
+  APP_PROFILES_SET: "app-profiles:set",
+
+  // —— 能力授权（屏幕/键鼠/对外发送，撤回可持续生效） ——
+  AUTHZ_GET: "authz:get",
+  AUTHZ_GRANT: "authz:grant",
+  AUTHZ_REVOKE: "authz:revoke",
 
   // —— WebGPU 自检 ——
   GPU_CHECK: "gpu:check",

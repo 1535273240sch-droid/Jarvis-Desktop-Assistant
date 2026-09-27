@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { app } from "electron";
+import { userDataDir } from "./user-path";
 
 /**
  * 日志系统。
@@ -60,7 +60,7 @@ class Logger {
   constructor() {
     let dir: string;
     try {
-      dir = path.join(app?.getPath("userData") || process.cwd(), "logs");
+      dir = path.join(userDataDir(), "logs");
     } catch {
       dir = path.join(process.cwd(), "logs");
     }

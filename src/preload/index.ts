@@ -69,6 +69,23 @@ const panelApi = {
   emergencyStopStatus: () => invoke("emergency-stop:status"),
   emergencyStopReset: () => invoke("emergency-stop:reset"),
 
+  // 桌面任务（跨软件长任务）
+  taskList: () => invoke("task:list"),
+  taskCreate: (input: unknown) => invoke("task:create", input),
+  taskAction: (payload: unknown) => invoke("task:action", payload),
+  taskResultPage: (payload: unknown) => invoke("task:result-page", payload),
+  stopAllTasks: () => invoke("tasks:stop-all"),
+  onTaskEvent: (cb: Listener) => on("task:event", cb),
+
+  // 目标软件档案
+  appProfilesGet: () => invoke("app-profiles:get"),
+  appProfilesSet: (profiles: unknown) => invoke("app-profiles:set", profiles),
+
+  // 能力授权（屏幕/键鼠/对外发送）
+  authzGet: () => invoke("authz:get"),
+  authzGrant: (scope: string[]) => invoke("authz:grant", scope),
+  authzRevoke: (scope?: string[]) => invoke("authz:revoke", scope),
+
   // 视觉
   visionCapture: (payload: unknown) => invoke("vision:capture", payload),
 

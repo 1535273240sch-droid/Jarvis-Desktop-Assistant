@@ -11,3 +11,6 @@ memory.json
 audit.jsonl
 *.blockmap
 *.exe
+
+logs/
+tasks/

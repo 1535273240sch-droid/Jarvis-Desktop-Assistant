@@ -13,8 +13,9 @@ import { realtimeClient } from "./realtime";
 import { mcpClient } from "./mcp";
 import { visionManager } from "./vision";
 import { desktopController } from "./desktop-control";
-import { armEmergencyStop, disposeEmergencyStop } from "./emergency-stop";
-import { isAuthorized, ensureAutoAuthorized } from "./authorization";
+import { armEmergencyStop, disposeEmergencyStop, trigger as triggerEmergencyStop } from "./emergency-stop";
+import { isAuthorized, migrateLegacyAuthorization, getAuthzState } from "./authorization";
+import { taskRunner } from "./task-runner";
 import { registerIpcHandlers } from "./ipc";
 import { autoUpdater } from "electron-updater";
 import { initAutoUpdater, setUpdaterPanelResolver } from "./updater";
@@ -178,6 +179,12 @@ function createTray(): void {
       { label: "启动语音会话", click: () => void orchestrator.startSession() },
       { label: "停止语音会话", click: () => orchestrator.stopSession() },
       { label: "打断当前播报", click: () => orchestrator.interrupt("托盘菜单打断") },
+      {
+        label: "停止所有桌面任务（急停）",
+        click: () => {
+          triggerEmergencyStop("托盘菜单停止所有桌面任务");
+        },
+      },
       { type: "separator" },
       {
         label: "查看屏幕（截活动窗口）",
@@ -518,13 +525,26 @@ app.whenReady().then(async () => {
   // 3) 让安全模块知道去哪个窗口弹确认框
   safetyManager.setPanelResolver(() => panelWindow);
 
-  // 3b) 全自动模式：启动即授予屏幕/鼠标/键盘能力，之后不再逐次打断用户。
-  //     所有实际操作仍写入 audit.jsonl，可事后追溯。
-  ensureAutoAuthorized();
-  logger.info("[Authorization] 全自动模式：已授予屏幕录制/鼠标控制/键盘控制能力");
+  // 3b) 能力授权（项目书 P0 修复）：
+  //     - 不再「启动即自动全量授权」；已存在的授权记录视为用户显式选择，迁移保留；
+  //     - 撤回记录持久化，重启/截图/点击不会自动恢复；
+  //     - 未授权时首次使用会在面板提示（设置 → 能力授权）。
+  migrateLegacyAuthorization();
+  const authz = getAuthzState();
+  if (authz.state === "granted" || authz.state === "partial") {
+    logger.info(`[Authorization] 当前授权：${authz.scope.join(", ")}`);
+  } else if (authz.state === "revoked") {
+    logger.warn(`[Authorization] 存在持久化撤回记录（${authz.scope.join(", ")}），相关能力保持停用，直到用户在面板重新授权`);
+  } else {
+    logger.info("[Authorization] 尚未授权；首次使用桌面能力时请在面板「设置 → 能力授权」中开启");
+  }
 
-  // 4) 编排器与 IPC
+  // 3c) 审计日志留存：按配置保留最近 N 天（项目书 P0 日志留存规则）
+  safetyManager.pruneAuditLog(configManager.get().logRetentionDays ?? 30);
+
+  // 4) 编排器、任务引擎与 IPC
   orchestrator.init(() => panelWindow);
+  taskRunner.init(() => panelWindow);
   registerIpcHandlers({
     getOrbWindow: () => orbWindow,
     getPanelWindow: () => panelWindow,

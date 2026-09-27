@@ -3,7 +3,9 @@ import { spawn, ChildProcess } from "node:child_process";
 import { logger } from "./logger";
 import { safetyManager } from "./safety";
 import { configManager } from "./config";
-import type { McpServerConfig } from "../common/types";
+import { isStopped, onStop } from "./emergency-stop";
+import { sanitizeToolOutput } from "./prompt-guard";
+import type { McpServerConfig, SecurityConfirmRequest } from "../common/types";
 
 /**
  * 外部 MCP 客户端（stdio 传输）。
@@ -15,11 +17,15 @@ import type { McpServerConfig } from "../common/types";
  *
  * 与内置 DesktopCommander 的区别：
  *   - 内置那份是「本机桌面操作」专用，工具名走白名单裁剪；
- *   - 这里面向用户自定义扩展，工具**全量暴露**（用户自己选的服务器自己负责），
- *     但工具名统一加 `<serverName>__` 前缀，避免不同服务器重名互相覆盖。
+ *   - 这里面向用户自定义扩展，但**不再无脑全量暴露**：工具经 ActionPolicy
+ *     分类后按能力清单管控，无法分类的写入类工具默认请求确认（项目书 P0）。
  *
- * 安全：调用同样经过 safetyManager 的风险评估与审计；高危命令仍会按用户选择的
- * 执行模式（全自动/逐次确认）处理。
+ * 安全（项目书 P0/P1）：
+ *   - external_send / account_or_payment / unknown 一律独立确认，
+ *     不受 confirmHighRisk 全局开关豁免；
+ *   - 急停后新调用直接拒绝；正在等待的调用被取消等待（不产生新动作）；
+ *   - 工具结果按「不可信外部内容」包裹回注，防止网页/聊天文字提升为指令；
+ *   - 审计参数经 log-redact 脱敏（在 safetyManager 内统一执行）。
  */
 
 interface JsonRpcResponse {
@@ -29,11 +35,17 @@ interface JsonRpcResponse {
   error?: { code: number; message: string; data?: unknown };
 }
 
+interface PendingCall {
+  resolve: (r: JsonRpcResponse) => void;
+  timer: NodeJS.Timeout;
+  method: string;
+}
+
 interface ServerRuntime {
   config: McpServerConfig;
   proc: ChildProcess | null;
   nextId: number;
-  pending: Map<number, { resolve: (r: JsonRpcResponse) => void; timer: NodeJS.Timeout }>;
+  pending: Map<number, PendingCall>;
   stdoutBuffer: string;
   tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>;
   ready: boolean;
@@ -82,16 +94,19 @@ class ExternalMcpManager extends EventEmitter {
     this.respawnTimers.set(key, t);
   }
 
-  /** 当前已就绪服务器的全部工具（含前缀名，可直接下发给模型） */
-  toModelTools(): Array<Record<string, unknown>> {
+  /** 当前已就绪服务器的全部工具（含前缀名，可直接下发给模型）。
+   *  filter：按能力过滤（任务运行中只暴露该任务需要的工具，项目书 P1） */
+  toModelTools(filter?: (full: { server: string; tool: string; name: string }) => boolean): Array<Record<string, unknown>> {
     const out: Array<Record<string, unknown>> = [];
     for (const rt of this.servers.values()) {
       if (!rt.ready) continue;
       for (const t of rt.tools) {
+        const full = prefixToolName(rt.config.name, t.name);
+        if (filter && !filter({ server: rt.config.name, tool: t.name, name: full })) continue;
         out.push({
           type: "function",
           function: {
-            name: prefixToolName(rt.config.name, t.name),
+            name: full,
             description: (t.description || `${rt.config.name} 的 ${t.name} 工具`).slice(0, 1024),
             parameters: (t.inputSchema as Record<string, unknown>) || { type: "object", properties: {} },
           },
@@ -114,6 +129,20 @@ class ExternalMcpManager extends EventEmitter {
   /** 是否归外部 MCP 管（用于 orchestrator 分派） */
   owns(fullName: string): boolean {
     return this.resolveTool(fullName) !== null;
+  }
+
+  /** 指定服务器是否有某个工具（用于桌面驱动探测 Windows-MCP 能力） */
+  hasTool(serverName: string, toolName: string): boolean {
+    const rt = this.servers.get(serverName);
+    if (!rt || !rt.ready) return false;
+    return rt.tools.some((t) => t.name === toolName);
+  }
+
+  /** 拼出某服务器工具的前缀全名（不存在时返回 null） */
+  fullToolName(serverName: string, toolName: string): string | null {
+    const rt = this.servers.get(serverName);
+    if (!rt || !rt.ready) return null;
+    return rt.tools.some((t) => t.name === toolName) ? prefixToolName(serverName, toolName) : null;
   }
 
   status(): Array<{ name: string; ready: boolean; toolCount: number; error?: string; command: string }> {
@@ -192,8 +221,7 @@ class ExternalMcpManager extends EventEmitter {
         const attempts = (this.respawnAttempts.get(cfg.name) || 0) + 1;
         this.scheduleRespawn(cfg, attempts);
       }
-    });
-    rt.proc.on("error", (err) => {
+    });    rt.proc.on("error", (err) => {
       rt.lastError = err.message;
       logger.errorCategorized("tool_unavailable", "ExtMCP", `外部 MCP「${cfg.name}」进程错误：${err.message}`, {
         handled: true,
@@ -305,7 +333,7 @@ class ExternalMcpManager extends EventEmitter {
         rt.pending.delete(id);
         resolve({ jsonrpc: "2.0", id, error: { code: -32001, message: `调用 ${method} 超时（${timeoutMs}ms）` } });
       }, timeoutMs);
-      rt.pending.set(id, { resolve, timer });
+      rt.pending.set(id, { resolve, timer, method });
       try {
         rt.proc.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
       } catch (e) {
@@ -314,6 +342,25 @@ class ExternalMcpManager extends EventEmitter {
         resolve({ jsonrpc: "2.0", id: -1, error: { code: -32000, message: (e as Error).message } });
       }
     });
+  }
+
+  /**
+   * 取消全部挂起中的调用（急停时由 onStop 触发）。
+   * 单次 stdio 调用无法真正中断子进程内部执行，但等待会立即结束、
+   * 结果被丢弃、后续动作被 isStopped 阻断 —— 即「正在等待不可中断调用结束」。
+   */
+  cancelAllInFlight(reason: string): number {
+    let n = 0;
+    for (const rt of this.servers.values()) {
+      for (const [, p] of rt.pending) {
+        clearTimeout(p.timer);
+        p.resolve({ jsonrpc: "2.0", id: -1, error: { code: -32002, message: `急停：${reason}，等待已中止` } });
+        n += 1;
+      }
+      rt.pending.clear();
+    }
+    if (n) logger.warn(`[ExtMCP] 急停：已中止 ${n} 个挂起中的外部 MCP 调用`);
+    return n;
   }
 
   private onStdout(rt: ServerRuntime, chunk: Buffer): void {
@@ -338,46 +385,91 @@ class ExternalMcpManager extends EventEmitter {
     }
   }
 
-  /* ---------------- 工具调用（含安全闸门） ---------------- */
+  /* ---------------- 工具调用（ActionPolicy 安全闸门） ---------------- */
+
+  /**
+   * 从参数里提取「对外发送」确认所需的通信要素。
+   * 收件人/正文/附件清单将完整展示在确认界面（项目书 P0）。
+   */
+  private extractComm(args: Record<string, unknown>): { recipient: string; body: string; attachments: string[] } | null {
+    const rec = args.to ?? args.recipient ?? args.contact ?? args.phone ?? args.会话 ?? args.联系人;
+    const body = args.message ?? args.text ?? args.content ?? args.body;
+    const files = args.files ?? args.images ?? args.attachments;
+    if (rec === undefined && body === undefined && files === undefined) return null;
+    return {
+      recipient: String(rec ?? "（未指明收件人）"),
+      body: typeof body === "string" ? body : body === undefined ? "" : JSON.stringify(body, null, 2),
+      attachments: Array.isArray(files) ? files.map((f) => String(f)) : typeof files === "string" ? [files] : [],
+    };
+  }
 
   async callTool(
     fullName: string,
-    args: Record<string, unknown>
+    args: Record<string, unknown>,
+    opts: { timeoutMs?: number } = {}
   ): Promise<{ ok: boolean; output: string; rejected?: boolean }> {
     const found = this.resolveTool(fullName);
     if (!found) return { ok: false, output: `未找到外部工具 ${fullName}` };
     const { rt, toolName } = found;
     const started = Date.now();
 
+    // 0) 急停：阻断一切新的外部 MCP 动作（A4）
+    if (isStopped()) {
+      safetyManager.auditToolCall(fullName, args, "rejected", 0, "全局急停生效中");
+      return { ok: false, output: "全局急停生效中，已拒绝执行该外部工具。请先在面板解除急停。", rejected: true };
+    }
+
     if (!rt.ready || !rt.proc) {
       return { ok: false, output: `外部 MCP「${rt.config.name}」未就绪：${rt.lastError || "未知原因"}` };
     }
 
-    // 与内置路径一致的风险评估
-    const risk = safetyManager.needsConfirmation(toolName, args);
-    if (risk.need && configManager.get().confirmHighRisk) {
-      const approved = await safetyManager.requestConfirmation({
+    // 1) ActionPolicy 语义分类（项目书 P0）
+    const cls = safetyManager.classifyAction(rt.config.name, toolName, args);
+
+    // 2) 强制独立确认类：对外发送 / 支付账号 / 未知工具 —— 不受 confirmHighRisk 豁免
+    if (cls.needsConfirm) {
+      const comm = cls.category === "external_send" ? this.extractComm(args) : null;
+      const req: SecurityConfirmRequest = {
         requestId: `cfm_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
-        riskLevel: risk.level,
-        actionType: "terminal_command",
+        riskLevel: cls.risk === "critical" ? "critical" : "high",
+        actionType: cls.category === "external_send" ? "external_send" : "terminal_command",
         title: `是否允许执行：${rt.config.name} / ${toolName}`,
-        target: JSON.stringify(args).slice(0, 200),
-        explanation: `${risk.label}\n\n参数：${JSON.stringify(args, null, 2).slice(0, 800)}`,
-      });
+        target: comm ? `发送给：${comm.recipient}` : JSON.stringify(args).slice(0, 200),
+        explanation: `${cls.label}\n\n该动作类型（${cls.category}）必须逐次确认，执行模式开关对此无效。`,
+        comm: comm ?? undefined,
+      };
+      const approved = await safetyManager.requestConfirmation(req);
       if (!approved) {
         safetyManager.auditToolCall(fullName, args, "rejected", Date.now() - started);
         return { ok: false, output: "用户拒绝执行该操作。请勿重试。", rejected: true };
       }
-    } else if (risk.need) {
-      safetyManager.audit("auto_approved", { toolName: fullName, label: risk.label, source: "external-mcp" });
+    } else {
+      // 3) 其余类别沿用既有的 confirmHighRisk 行为
+      const risk = safetyManager.needsConfirmation(toolName, args);
+      if (risk.need && configManager.get().confirmHighRisk) {
+        const approved = await safetyManager.requestConfirmation({
+          requestId: `cfm_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
+          riskLevel: risk.level,
+          actionType: "terminal_command",
+          title: `是否允许执行：${rt.config.name} / ${toolName}`,
+          target: JSON.stringify(args).slice(0, 200),
+          explanation: `${risk.label}\n\n参数：${JSON.stringify(args, null, 2).slice(0, 800)}`,
+        });
+        if (!approved) {
+          safetyManager.auditToolCall(fullName, args, "rejected", Date.now() - started);
+          return { ok: false, output: "用户拒绝执行该操作。请勿重试。", rejected: true };
+        }
+      } else if (risk.need) {
+        safetyManager.audit("auto_approved", { toolName: fullName, label: risk.label, source: "external-mcp" });
+      }
     }
 
+    // 4) 执行（超时可由任务引擎按步骤收紧；不再固定 90 秒）
     try {
-      const res = await this.rpc(rt, "tools/call", { name: toolName, arguments: args }, 90_000);
+      const res = await this.rpc(rt, "tools/call", { name: toolName, arguments: args }, opts.timeoutMs ?? 90_000);
       const dur = Date.now() - started;
       if (res.error) {
         safetyManager.auditToolCall(fullName, args, "error", dur, res.error.message);
-        // 关键：外部 MCP 的失败也要进分类错误日志，方便排查「指令没做成」
         logger.errorCategorized("tool_execution", "ExtMCP", `外部工具 ${fullName} 报错：${res.error.message}`, {
           tool: fullName,
           handled: true,
@@ -399,7 +491,9 @@ class ExternalMcpManager extends EventEmitter {
           handled: true,
         });
       }
-      return { ok: !isError, output: text || (isError ? "工具返回错误（无详情）" : "执行完成（无输出）") };
+      // 5) 工具结果按「不可信外部内容」包裹（网页/聊天/Agent 文字不得提升为指令）
+      const safeText = sanitizeToolOutput(text || "", rt.config.name);
+      return { ok: !isError, output: safeText || (isError ? "工具返回错误（无详情）" : "执行完成（无输出）") };
     } catch (e) {
       const dur = Date.now() - started;
       safetyManager.auditToolCall(fullName, args, "error", dur, (e as Error).message);
@@ -411,5 +505,8 @@ class ExternalMcpManager extends EventEmitter {
     }
   }
 }
+
+// 急停：中止全部挂起调用（新调用由 callTool 入口 isStopped 阻断）
+onStop((reason) => externalMcp.cancelAllInFlight(reason));
 
 export const externalMcp = new ExternalMcpManager();

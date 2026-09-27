@@ -4,6 +4,8 @@ import { spawn, ChildProcess } from "node:child_process";
 import { logger } from "./logger";
 import { configManager } from "./config";
 import { safetyManager } from "./safety";
+import { isStopped, onStop } from "./emergency-stop";
+import { sanitizeToolOutput } from "./prompt-guard";
 import { IPC } from "../common/types";
 import type { SecurityConfirmRequest } from "../common/types";
 
@@ -389,8 +391,23 @@ export class McpClient extends EventEmitter {
   }
 
   /**
+   * 取消全部挂起中的调用（急停时由 onStop 触发）：等待立即结束、结果丢弃。
+   */
+  cancelAllInFlight(reason: string): number {
+    let n = 0;
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.resolve({ jsonrpc: "2.0", id: -1, error: { code: -32002, message: `急停：${reason}，等待已中止` } });
+      n += 1;
+    }
+    this.pending.clear();
+    if (n) logger.warn(`[MCP] 急停：已中止 ${n} 个挂起中的内置 MCP 调用`);
+    return n;
+  }
+
+  /**
    * 执行一次工具调用。
-   * 流程：参数归一化 -> 风险评估 -> 必要时人工确认 -> 调用 -> 审计。
+   * 流程：参数归一化 -> 急停检查 -> ActionPolicy 语义分类 -> 必要时人工确认 -> 调用 -> 审计。
    */
   async callTool(
     toolName: string,
@@ -399,41 +416,70 @@ export class McpClient extends EventEmitter {
     const started = Date.now();
     args = this.normalizeWindowsArgs(toolName, args);
 
+    // 0) 急停：阻断一切新的桌面/命令动作（A4）
+    if (isStopped()) {
+      safetyManager.auditToolCall(toolName, args, "rejected", 0, "全局急停生效中");
+      return { ok: false, output: "全局急停生效中，已拒绝执行该工具。请先在面板解除急停。", rejected: true };
+    }
+
     if (!this.isReady()) {
       return { ok: false, output: "MCP 未就绪，无法执行工具。" };
     }
 
-    // 1. 安全评估（全自动模式下不弹窗，但保留审计）
-    const risk = safetyManager.needsConfirmation(toolName, args);
-    if (risk.need) {
-      const cfg = configManager.get();
-      if (!cfg.confirmHighRisk) {
-        safetyManager.audit("auto_approved", {
-          toolName,
-          label: risk.label,
-          argsPreview: JSON.stringify(args).slice(0, 300),
-        });
-        logger.info(`[MCP] 全自动模式放行：${toolName} (${risk.label})`);
-      } else {
-        const req: SecurityConfirmRequest = {
-          requestId: `cfm_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
-          riskLevel: risk.level,
-          actionType: toolName === "start_process" ? "terminal_command" : "file_write",
-          title: `是否允许执行：${toolName}`,
-          target: String(
-            (args.command as string) ||
-              (args.path as string) ||
-              (args.filePath as string) ||
-              JSON.stringify(args).slice(0, 200)
-          ),
-          explanation: `${risk.label}\n\n参数：${JSON.stringify(args, null, 2).slice(0, 800)}`,
-        };
+    // 1. ActionPolicy 语义分类：external_send / account_or_payment / unknown
+    //    一律独立确认，不受 confirmHighRisk 全局开关豁免（项目书 P0）。
+    const cls = safetyManager.classifyAction("builtin", toolName, args);
+    if (cls.needsConfirm) {
+      const approved = await safetyManager.requestConfirmation({
+        requestId: `cfm_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
+        riskLevel: cls.risk === "critical" ? "critical" : "high",
+        actionType: "terminal_command",
+        title: `是否允许执行：${toolName}`,
+        target: String(
+          (args.command as string) ||
+            (args.path as string) ||
+            (args.filePath as string) ||
+            JSON.stringify(args).slice(0, 200)
+        ),
+        explanation: `${cls.label}\n\n该动作类型（${cls.category}）必须逐次确认，执行模式开关对此无效。`,
+      });
+      if (!approved) {
+        safetyManager.auditToolCall(toolName, args, "rejected", Date.now() - started);
+        return { ok: false, output: "用户拒绝执行该操作。请勿重试，改为向用户说明原因或提供替代方案。", rejected: true };
+      }
+    } else {
+      // 2. 其余类别沿用既有的确认策略
+      const risk = safetyManager.needsConfirmation(toolName, args);
+      if (risk.need) {
+        const cfg = configManager.get();
+        if (!cfg.confirmHighRisk) {
+          safetyManager.audit("auto_approved", {
+            toolName,
+            label: risk.label,
+            argsPreview: JSON.stringify(args).slice(0, 300),
+          });
+          logger.info(`[MCP] 全自动模式放行：${toolName} (${risk.label})`);
+        } else {
+          const req: SecurityConfirmRequest = {
+            requestId: `cfm_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
+            riskLevel: risk.level,
+            actionType: toolName === "start_process" ? "terminal_command" : "file_write",
+            title: `是否允许执行：${toolName}`,
+            target: String(
+              (args.command as string) ||
+                (args.path as string) ||
+                (args.filePath as string) ||
+                JSON.stringify(args).slice(0, 200)
+            ),
+            explanation: `${risk.label}\n\n参数：${JSON.stringify(args, null, 2).slice(0, 800)}`,
+          };
 
-        logger.info(`[MCP] 高风险操作需人工确认：${toolName} (${risk.label})`);
-        const approved = await safetyManager.requestConfirmation(req);
-        if (!approved) {
-          safetyManager.auditToolCall(toolName, args, "rejected", Date.now() - started);
-          return { ok: false, output: "用户拒绝执行该操作。请勿重试，改为向用户说明原因或提供替代方案。", rejected: true };
+          logger.info(`[MCP] 高风险操作需人工确认：${toolName} (${risk.label})`);
+          const approved = await safetyManager.requestConfirmation(req);
+          if (!approved) {
+            safetyManager.auditToolCall(toolName, args, "rejected", Date.now() - started);
+            return { ok: false, output: "用户拒绝执行该操作。请勿重试，改为向用户说明原因或提供替代方案。", rejected: true };
+          }
         }
       }
     }
@@ -462,7 +508,9 @@ export class McpClient extends EventEmitter {
 
       const isError = Boolean(res.result?.isError);
       safetyManager.auditToolCall(toolName, args, isError ? "failed" : "success", dur, text);
-      return { ok: !isError, output: text || (isError ? "工具返回错误（无详情）" : "执行完成（无输出）") };
+      // 工具结果按「不可信外部内容」包裹，防止文件/命令输出里的文字变成指令
+      const safeText = sanitizeToolOutput(text || "", "desktop-commander");
+      return { ok: !isError, output: safeText || (isError ? "工具返回错误（无详情）" : "执行完成（无输出）") };
     } catch (e) {
       const dur = Date.now() - started;
       safetyManager.auditToolCall(toolName, args, "error", dur, (e as Error).message);
@@ -485,6 +533,9 @@ export class McpClient extends EventEmitter {
     }));
   }
 }
+
+// 急停：中止全部挂起调用（新调用由 callTool 入口 isStopped 阻断）
+onStop((reason) => mcpClient.cancelAllInFlight(reason));
 
 /** 把工具名规范化到 StepFun 允许的字符集与长度 */
 export function sanitizeToolName(name: string): string {

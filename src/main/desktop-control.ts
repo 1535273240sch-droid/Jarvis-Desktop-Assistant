@@ -4,7 +4,7 @@ import { logger } from "./logger";
 import { safetyManager } from "./safety";
 import { configManager } from "./config";
 import { checkPoint, isEmergencyStopError } from "./emergency-stop";
-import { isAuthorized, ensureAutoAuthorized, type Capability } from "./authorization";
+import { isAuthorized, type Capability } from "./authorization";
 import { imageToScreen, virtualScreenBounds } from "./coordinate-mapping";
 import type { SecurityConfirmRequest } from "../common/types";
 import type { Point, Rect } from "./coordinate-mapping";
@@ -449,11 +449,13 @@ ${up}
 
   /* ---------------- 内部 ---------------- */
 
-  /** 能力授权检查：全自动模式下自动授权并放行 */
+  /** 能力授权检查：未授权时明确拒绝并指引用户到面板开启（撤回后不会自动恢复） */
   private ensureAuthorized(cap: Capability): string {
     if (isAuthorized(cap)) return "";
-    ensureAutoAuthorized();
-    return "";
+    safetyManager.audit("desktop_action_unauthorized", { capability: cap });
+    const label =
+      cap === "mouse-control" ? "鼠标控制" : cap === "keyboard-control" ? "键盘控制" : cap === "screen-capture" ? "屏幕录制" : cap;
+    return `该能力（${label}）尚未授权或已被用户撤回，操作被拒绝。请在面板「设置 → 能力授权」中开启后重试。`;
   }
 
   /** 敏感内容识别（与 T07 任务目录 safety/confirmation.ts 同一规则） */

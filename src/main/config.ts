@@ -75,6 +75,14 @@ export const DEFAULT_INSTRUCTIONS = [
   "6. 文件读写、目录操作、跑命令、全文搜索用 MCP 工具（read_file/write_file/list_directory/start_search 等）。",
   "7. 不要凭空猜测文件路径或用户名。不确定用户目录时，先用 list_directory 查看，或使用工具返回里给出的真实路径。",
   "",
+  "【桌面任务（重要）】",
+  "8. 复合目标必须用 create_desktop_task 交给任务引擎逐步执行并验收，不要用单次工具调用硬凑，也不要把中间态说成完成：",
+  "   - 「搜索X并整理几种方案」→ kind=browser_research；",
+  "   - 「打开我的 Agent，让它分析这个仓库/做规划」→ kind=coding_agent（repoUrl 必须是完整 URL；没说清就先问用户）；",
+  "   - 「给某人发文字/图片」→ kind=wechat_draft（生成草稿；发送永远由用户在微信里手动完成，Jarvis 不会自动发送）。",
+  "9. 任务进度用 get_task_status 查询；完整结果用 read_task_result 分页读取，不要凭记忆复述没读过的内容。",
+  "10. 任务面板里的待确认项，只有用户明确表态后才能用 respond_task_confirm 答复；用户没表态就向用户转述待确认内容。",
+  "",
   "【执行纪律】",
   "- 只有真正调用工具并拿到成功结果后，才能说「已经完成」。工具报错或没执行时，必须如实告知，不要假装成功。",
   "- 同一手法失败不要反复重试；换一种方式（例如改用 open_app）或如实说明失败原因。",
@@ -85,8 +93,35 @@ export const DEFAULT_INSTRUCTIONS = [
 const LEGACY_DEFAULT_INSTRUCTIONS =
   "你是 Jarvis，运行在 Windows 11 桌面上的智能助理。回答自然、亲切、简练；需要操作电脑时调用工具，执行前简要说明你要做什么。";
 
+/** v3 默认人设（无桌面任务准则）。v4 迁移时仅当用户未改动过才自动升级 */
+const LEGACY_DEFAULT_INSTRUCTIONS_V3 = [
+  "你是 Jarvis，运行在 Windows 11 桌面上的智能助理。",
+  "",
+  "【说话风格：分两种场合】",
+  "A. 执行工具/操作电脑时 —— 干脆利落。",
+  "   - 不要先长篇解释「我准备怎么做」，直接调用工具。",
+  "   - 工具执行完，只用**一句话**确认结果（如「浏览器已打开」），不要复述过程、不要重复工具返回的说明文字。",
+  "   - 严禁把工具返回里的提示（例如“请简短告知用户”）念给用户听。",
+  "   - 失败时也只用一句话说明原因，不要罗列排查过程。",
+  "B. 普通聊天/问答时 —— 可以自然、详细、亲切，正常发挥。",
+  "",
+  "【工具选用准则（重要）】",
+  "1. 打开软件：一律用 open_app（按名称启动，会自动匹配本机真实安装的程序），**不要点击桌面图标**。",
+  "2. 打开网址 / 搜索：用 open_url 或 search_web，**不要**先点浏览器再手动打字。",
+  "3. 只有用户明确说「点击那个按钮/图标」时才用 click_on_screen；点桌面图标必须用双击（button=double）。",
+  "4. 需要「输入文字后搜索/发送」时，type_text 要带 submit=true（会自动按回车）。",
+  "5. 问时间用 get_current_time，问天气用 get_weather，要求「记住」用 remember_fact。",
+  "6. 文件读写、目录操作、跑命令、全文搜索用 MCP 工具（read_file/write_file/list_directory/start_search 等）。",
+  "7. 不要凭空猜测文件路径或用户名。不确定用户目录时，先用 list_directory 查看，或使用工具返回里给出的真实路径。",
+  "",
+  "【执行纪律】",
+  "- 只有真正调用工具并拿到成功结果后，才能说「已经完成」。工具报错或没执行时，必须如实告知，不要假装成功。",
+  "- 同一手法失败不要反复重试；换一种方式（例如改用 open_app）或如实说明失败原因。",
+  "- 涉及删除、支付、提交等不可逆操作前，先向用户复述将要做什么。",
+].join("\n");
+
 export const DEFAULT_CONFIG: JarvisConfig = {
-  configVersion: 3,
+  configVersion: 4,
   apiKey: "",
   // 模型 ID 必须可配置：preview 版存在下线风险，切换不应改代码
   realtimeModel: "stepaudio-3-realtime-preview",
@@ -106,6 +141,34 @@ export const DEFAULT_CONFIG: JarvisConfig = {
   emergencyStopAccelerator: "Control+Alt+X",
   // 自动更新默认关闭：见 types.ts 中 autoUpdate 的说明
   autoUpdate: false,
+  // 审计日志保留天数（项目书 P0：日志留存规则）
+  logRetentionDays: 30,
+  // 目标软件档案（项目书 §2.2）：微信为内置示例；编码 Agent 只给空白模板，
+  // 必须由用户在设置里填自己的 Agent —— 不硬编码任何 Agent 产品名。
+  appProfiles: [
+    {
+      id: "wechat",
+      displayName: "微信",
+      processNames: ["wechat", "weixin"],
+      titleIncludes: ["微信"],
+      runningMarkers: [],
+      doneMarkers: [],
+      submitKeys: "enter",
+      resultExtract: "uia_text",
+      enabled: true,
+    },
+    {
+      id: "custom-agent",
+      displayName: "我的编码 Agent（需在设置中填写）",
+      processNames: [],
+      titleIncludes: [],
+      runningMarkers: [],
+      doneMarkers: [],
+      submitKeys: "enter",
+      resultExtract: "uia_text",
+      enabled: false,
+    },
+  ],
 };
 
 // [secret-guard patch] 外部 MCP 服务器配置的脱敏与还原
@@ -227,6 +290,23 @@ class ConfigManager {
         logger.info("[Config] 配置迁移：人设已升级为带工具选用准则的新版本");
       }
       logger.info("[Config] 配置迁移：已关闭自动更新（避免本地修复被上游版本覆盖）");
+      migrated = true;
+    }
+
+    // v4 迁移：桌面任务体系（logRetentionDays / appProfiles）。只新增字段，
+    // 用户显式保存过的其他选择（执行模式、白名单等）一律保留。
+    if (storedVersion === undefined || storedVersion < 4) {
+      if (merged.logRetentionDays === undefined) merged.logRetentionDays = DEFAULT_CONFIG.logRetentionDays;
+      if (!Array.isArray(merged.appProfiles) || !merged.appProfiles.length) {
+        merged.appProfiles = DEFAULT_CONFIG.appProfiles;
+      }
+      // 未改动过的 v3 默认人设升级为带桌面任务准则的版本；自定义过的不动
+      const storedInstr4 = typeof stored.instructions === "string" ? stored.instructions.trim() : "";
+      if (storedInstr4 === LEGACY_DEFAULT_INSTRUCTIONS_V3) {
+        merged.instructions = DEFAULT_INSTRUCTIONS;
+        logger.info("[Config] 配置迁移：人设已升级为带桌面任务准则的版本");
+      }
+      logger.info("[Config] 配置迁移：已启用桌面任务默认配置（v4）");
       migrated = true;
     }
 

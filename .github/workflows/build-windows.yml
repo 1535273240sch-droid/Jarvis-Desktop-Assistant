@@ -92,6 +92,11 @@ jobs:
       - name: Verify tool execution end-to-end
         run: node scripts/run.mjs verify-tools
 
+      # 桌面任务体系回归测试（纯逻辑，无需 GUI）：动作语义分类、日志脱敏、
+      # 提示注入防护、微信草稿去重、任务持久化冒烟。失败即阻断发布。
+      - name: Verify desktop task suite
+        run: node scripts/run.mjs verify-tasks
+
       - name: Package Windows installer (NSIS) + update metadata
         run: npm run dist -- --publish never
 
