@@ -636,11 +636,13 @@
             <button id="btnMcpSave" class="primary">保存并重连</button>
             <button id="btnMcpTest">测试连接</button>
             <button id="btnMcpRefresh">刷新状态</button>
+            <button id="btnWmcpInstall">一键安装 Windows 桌面控制</button>
           </div>
           <div id="mcpExtStatus" class="hint">读取中...</div>
           <div class="hint">
             这里配置的服务器会与内置工具一起提供给助手，工具名会自动加 <code>服务器名__</code> 前缀避免重名。
             首次使用某个 server 时 npx 会自动下载它（需要联网）。
+            「一键安装 Windows 桌面控制」会自动下载并配置 Windows-MCP（UIA 桌面自动化，让任务引擎直接读控件树），全程有进度提示。
           </div>
         </div>
 
@@ -1643,6 +1645,30 @@ async function loadMcpExt() {
 }
 
 $('btnMcpRefresh').onclick = () => { loadMcpExt(); toast('已刷新'); };
+
+$('btnWmcpInstall').onclick = async () => {
+  const btn = $('btnWmcpInstall');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  const old = btn.textContent;
+  btn.textContent = '安装中…（首次 2-5 分钟）';
+  $('mcpExtStatus').textContent = '正在安装 Windows-MCP：下载 uv → 安装 windows-mcp → 写入配置。进度会以系统提示显示在聊天区。';
+  try {
+    const r = await api.mcpExtInstallWmcp();
+    if (r && r.ok) {
+      toast('Windows-MCP 安装完成，已自动配置');
+      await loadMcpExt();
+    } else {
+      toast('安装失败，详情见聊天区与日志');
+      $('mcpExtStatus').textContent = 'Windows-MCP 安装失败：' + String((r && r.log) || '').slice(-300);
+    }
+  } catch (e) {
+    toast('安装失败：' + (e && e.message ? e.message : e));
+  } finally {
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+};
 
 /* ---------------- 问题诊断 ---------------- */
 

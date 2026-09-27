@@ -590,6 +590,11 @@ class Orchestrator {
     this.pushToolsToModel();
   }
 
+  /** 向面板聊天流推送一条系统提示（进度/通知类，非模型输出） */
+  notifySystem(text: string): void {
+    this.broadcast(IPC.CHAT_MESSAGE, { systemNotice: text });
+  }
+
   /* ---------------- 工具执行闭环 ---------------- */
 
   private async handleToolCall(callId: string, name: string, argsJson: string): Promise<void> {

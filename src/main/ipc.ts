@@ -18,6 +18,7 @@ import { taskArtifacts } from "./task-artifacts";
 import { getProfiles, saveProfiles } from "./app-profiles";
 import { getAuthzState, grantAuthorization, revokeAuthorization } from "./authorization";
 import type { Capability } from "./authorization";
+import { wmcpInstaller } from "./wmcp-installer";
 import { IPC } from "../common/types";
 import type { JarvisConfig, AppProfile, TaskKind } from "../common/types";
 
@@ -411,6 +412,19 @@ export function registerIpcHandlers(deps: Deps): void {
   ipcMain.handle(IPC.MCP_EXT_TEST, async (_e, cfg) => {
     if (!cfg || !cfg.command) return { ok: false, reason: "缺少 command" };
     return externalMcp.testConfig(cfg);
+  });
+
+  // 一键安装 Windows 桌面控制（Windows-MCP）：面板按钮触发，安装后写入配置
+  ipcMain.handle(IPC.MCP_EXT_INSTALL_WMCP, async () => {
+    safetyManager.audit("wmcp_install_requested", {});
+    const r = await wmcpInstaller.install();
+    if (r.ok) {
+      // 装完立即拉起外部 MCP 并把新工具集下发给模型
+      const started = await externalMcp.startAll().catch(() => ({ started: 0, failed: 0 }));
+      orchestrator.pushToolsNow();
+      logger.info(`[IPC] Windows-MCP 安装流程完成，外部 MCP 重连：成功 ${started.started}，失败 ${started.failed}`);
+    }
+    return r;
   });
 
   logger.info("[IPC] 全部通道已注册");

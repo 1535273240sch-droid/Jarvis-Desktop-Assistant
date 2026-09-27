@@ -362,6 +362,7 @@ export const IPC = {
   MCP_EXT_RELOAD: "mcp-ext:reload",
   MCP_EXT_TEST: "mcp-ext:test",
   MCP_EXT_LIST_PRESETS: "mcp-ext:presets",
+  MCP_EXT_INSTALL_WMCP: "mcp-ext:install-wmcp",
 
   // —— 桌面任务（跨软件长任务） ——
   TASK_LIST: "task:list",

@@ -113,6 +113,7 @@ const panelApi = {
   mcpExtReload: (servers: unknown) => invoke("mcp-ext:reload", servers),
   mcpExtTest: (cfg: unknown) => invoke("mcp-ext:test", cfg),
   mcpExtPresets: () => invoke("mcp-ext:presets"),
+  mcpExtInstallWmcp: () => invoke("mcp-ext:install-wmcp"),
 
   // 其他
   togglePanel: () => invoke("window:toggle-panel"),

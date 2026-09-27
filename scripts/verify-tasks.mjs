@@ -193,6 +193,12 @@ try {
   const orchSrc = fs.readFileSync(path.join(root, "src", "main", "orchestrator.ts"), "utf-8");
   check(orchSrc.includes("create_desktop_task") && orchSrc.includes("read_task_result"), "内置任务工具已下发模型");
   check(orchSrc.includes("ensureAutoAuthorized") === false, "orchestrator 不再自动授权");
+
+  const preloadSrc = fs.readFileSync(path.join(root, "src", "preload", "index.ts"), "utf-8");
+  const ipcSrc = fs.readFileSync(path.join(root, "src", "main", "ipc.ts"), "utf-8");
+  const instSrc = fs.readFileSync(path.join(root, "src", "main", "wmcp-installer.ts"), "utf-8");
+  check(preloadSrc.includes("install-wmcp") && ipcSrc.includes("MCP_EXT_INSTALL_WMCP"), "一键安装 Windows-MCP 通道已接线");
+  check(instSrc.includes("MCP_EXT_INSTALL_WMCP") === false && instSrc.includes("exclude-tools"), "安装器写入预设参数（排除 Screenshot）");
 } catch (e) {
   check(false, "源码检查", e.message);
 }

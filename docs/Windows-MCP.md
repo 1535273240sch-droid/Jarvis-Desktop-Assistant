@@ -33,7 +33,17 @@ Jarvis 内置的 MCP（DesktopCommander）强在**终端与文件编辑**，桌�
 
 ## 二、如何启用
 
-### 前置条件：安装 Windows-MCP
+### 方式一：面板一键安装（v1.3.19 起推荐）
+
+面板 → MCP 设置 → 点「**一键安装 Windows 桌面控制**」。Jarvis 会自动完成：
+1. 检测是否已安装（PATH 或 uv 默认目录）；
+2. 缺 uv 时下载便携版 uv（官方源，失败自动切国内镜像）到 userData/tools/uv/；
+3. `uv tool install windows-mcp`（托管 Python 走 npmmirror 镜像，PyPI 失败自动重试 TUNA 备用源）；
+4. 把 windows-mcp.exe **绝对路径**写入外部 MCP 配置并立即重连 —— 避免了 PATH 未生效导致启动失败的问题。
+
+进度以系统提示实时显示在聊天区。安装完成后，启动语音会话时日志出现 `[ExtMCP] 「windows-mcp」发现 19 个工具` 即挂载成功。
+
+### 方式二：手动安装
 
 需要 Python ≥ 3.14（推荐用 [uv](https://docs.astral.sh/uv/) 管理，不污染系统环境）：
 
