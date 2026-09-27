@@ -45,7 +45,11 @@ registerAppSchemePrivileges();
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
-  app.quit();
+  // 已有实例在运行（关闭面板只是最小化到托盘，首实例仍然存活）。
+  // 必须立即退出：若继续初始化，两个实例会共用同一份 userData 并争抢
+  // GPU/WebGPU 缓存锁，导致后启动实例的球体渲染进程挂起——
+  // 表现为悬浮球永远不显示、setState 全部报「球体窗口不可用」。
+  app.exit(0);
 }
 
 let orbWindow: BrowserWindow | null = null;
@@ -561,7 +565,14 @@ app.whenReady().then(async () => {
   }
 
   // 5) 加载球体（必须用 app://，不能用 file://）
-  orbWindow.loadURL("app://orb/orb.html");
+  //    监听器必须先于 loadURL 注册：加载失败时才留得下日志，
+  //    否则表现为「球体无声无息不出现」，无从排查。
+  orbWindow.webContents.on("did-fail-load", (_e, code, desc, url) => {
+    logger.error(`[Orb] 球体页面加载失败 code=${code} desc=${desc} url=${url}`);
+  });
+  orbWindow.loadURL("app://orb/orb.html").catch((e) => {
+    logger.error("[Orb] 球体 loadURL 异常:", e);
+  });
 
   // 6) 托盘
   createTray();
