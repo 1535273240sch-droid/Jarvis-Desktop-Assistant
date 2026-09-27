@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { spawn, ChildProcess } from "node:child_process";
+import { spawn, spawnSync, ChildProcess } from "node:child_process";
 import { logger } from "./logger";
 import { safetyManager } from "./safety";
 import { configManager } from "./config";
@@ -268,7 +268,14 @@ class ExternalMcpManager extends EventEmitter {
     for (const rt of this.servers.values()) {
       if (rt.proc) {
         try {
-          rt.proc.kill();
+          if (process.platform === "win32" && rt.proc.pid) {
+            // spawn 用了 shell:true，直接子进程是 cmd.exe 壳；proc.kill() 只杀壳，
+            // 真正的服务进程（windows-mcp / npx node）会孤儿化残留，必须连进程树一起清。
+            // spawnSync 保证 app 完全退出前进程树已终止。
+            spawnSync("taskkill", ["/pid", String(rt.proc.pid), "/T", "/F"], { stdio: "ignore" });
+          } else {
+            rt.proc.kill();
+          }
         } catch {
           /* ignore */
         }
