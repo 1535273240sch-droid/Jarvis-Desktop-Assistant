@@ -282,6 +282,8 @@ export interface JarvisConfig {
   logRetentionDays?: number;
   /** 用户配置的目标软件档案（编码 Agent / 微信 / 浏览器等，项目书 §2.2） */
   appProfiles?: AppProfile[];
+  /** 悬浮球主题（siri=经典默认；frost/opal/blueDrop/refractiveBlob/particleRibbon） */
+  orbTheme?: string;
 }
 
 /* ------------------------------------------------------------------ */

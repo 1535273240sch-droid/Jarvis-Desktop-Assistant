@@ -169,6 +169,8 @@ export const DEFAULT_CONFIG: JarvisConfig = {
       enabled: false,
     },
   ],
+  // 悬浮球主题：siri=经典默认；其余为用户提供的 5 套主题（generate-orb 注入）
+  orbTheme: "siri",
 };
 
 // [secret-guard patch] 外部 MCP 服务器配置的脱敏与还原

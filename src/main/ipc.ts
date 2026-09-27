@@ -213,12 +213,24 @@ export function registerIpcHandlers(deps: Deps): void {
     // 空字符串表示「不修改 Key」，避免误清除
     if (safe.apiKey !== undefined && !String(safe.apiKey).trim()) delete safe.apiKey;
 
+    const prevOrbTheme = configManager.get().orbTheme || "siri";
     configManager.set(safe);
     safetyManager.audit("config_change", {
       keys: Object.keys(safe),
       // 绝不把 Key 写进审计
       apiKeyChanged: safe.apiKey !== undefined,
     });
+
+    // 悬浮球主题变更：热重载球体页面（构建期已注入全部主题）
+    if (typeof safe.orbTheme === "string" && safe.orbTheme && safe.orbTheme !== prevOrbTheme) {
+      const win = deps.getOrbWindow();
+      if (win && !win.isDestroyed()) {
+        orbController.attachTarget(win);
+        const ok = await orbController.reloadWithTheme(safe.orbTheme);
+        safetyManager.audit("orb_theme_changed", { from: prevOrbTheme, to: safe.orbTheme, reloaded: ok });
+        logger.info(`[IPC] 悬浮球主题：${prevOrbTheme} -> ${safe.orbTheme}（重载${ok ? "成功" : "失败，保持原画面"}）`);
+      }
+    }
 
     // 模型或 Key 变更后刷新会话状态提示
     realtimeClient.refreshStatus();

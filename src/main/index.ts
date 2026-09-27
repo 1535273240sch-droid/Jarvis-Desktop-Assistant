@@ -570,9 +570,12 @@ app.whenReady().then(async () => {
   orbWindow.webContents.on("did-fail-load", (_e, code, desc, url) => {
     logger.error(`[Orb] 球体页面加载失败 code=${code} desc=${desc} url=${url}`);
   });
-  orbWindow.loadURL("app://orb/orb.html").catch((e) => {
-    logger.error("[Orb] 球体 loadURL 异常:", e);
-  });
+  const orbTheme = configManager.get().orbTheme || "siri";
+  orbWindow
+    .loadURL(`app://orb/orb.html?theme=${encodeURIComponent(orbTheme)}`)
+    .catch((e) => {
+      logger.error("[Orb] 球体 loadURL 异常:", e);
+    });
 
   // 6) 托盘
   createTray();

@@ -598,6 +598,22 @@
         </div>
 
         <div class="field">
+          <label>悬浮球主题</label>
+          <div class="row">
+            <select id="orbTheme">
+              <option value="siri">经典 Siri（默认·冷银晶体）</option>
+              <option value="frost">霜白 Frost</option>
+              <option value="opal">蛋白石 Opal</option>
+              <option value="blueDrop">深海蓝 BlueDrop</option>
+              <option value="refractiveBlob">紫晶 Refractive</option>
+              <option value="particleRibbon">粒子丝带 Ribbon</option>
+            </select>
+            <button id="btnApplyOrbTheme">应用</button>
+          </div>
+          <div class="hint">切换后悬浮球重载一次（约 1-2 秒），六个状态（空闲/聆听/思考/执行/播报/错误）都会按该主题配色。设置会保存，重启后保持。</div>
+        </div>
+
+        <div class="field">
           <label>执行模式</label>
           <div class="row">
             <select id="execMode">
@@ -1299,6 +1315,8 @@ async function loadConfig() {
 
     $('allowedDirs').value = (c.allowedDirectories || []).join('\n');
     $('execMode').value = c.confirmHighRisk ? 'confirm' : 'auto';
+    // 悬浮球主题回显
+    if ($('orbTheme')) $('orbTheme').value = c.orbTheme || 'siri';
     // 人设提示词：未编辑过则显示当前生效值
     if ($('instructions') && !$('instructions').dataset.dirty) {
       $('instructions').value = c.instructions || '';
@@ -1312,8 +1330,17 @@ async function loadConfig() {
   }
 }
 
-$('voiceSelect').onchange = () => {
-  if ($('voiceSelect').value === 'custom') {
+$('btnApplyOrbTheme').onclick = async () => {
+  const theme = $('orbTheme').value || 'siri';
+  try {
+    await api.setConfig({ orbTheme: theme });
+    toast('悬浮球主题已切换，球体重载中…');
+  } catch (e) {
+    toast('主题切换失败：' + (e && e.message ? e.message : e));
+  }
+};
+
+$('voiceSelect').onchange = () => {  if ($('voiceSelect').value === 'custom') {
     $('customVoiceInput').style.display = 'inline-block';
     $('customVoiceInput').focus();
   } else {

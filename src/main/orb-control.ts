@@ -136,6 +136,33 @@ class OrbController {
       return { supported: false, error: (e as Error).message };
     }
   }
+
+  /**
+   * 按主题重载球体页面（orb.html?theme=<id>，主题在构建期注入）。
+   * 重载后重新等待就绪并恢复当前六态显示；失败返回 false（保持旧画面）。
+   */
+  async reloadWithTheme(theme: string): Promise<boolean> {
+    const win = this.win;
+    if (!win || win.isDestroyed()) {
+      logger.warn("[OrbControl] 换主题失败：球体窗口不可用");
+      return false;
+    }
+    this.readyFlag = false;
+    const url = `app://orb/orb.html?theme=${encodeURIComponent(theme || "siri")}`;
+    try {
+      await win.loadURL(url);
+    } catch (e) {
+      logger.warn("[OrbControl] 主题重载 loadURL 失败:", (e as Error).message);
+      return false;
+    }
+    const ok = await this.waitReady(12_000);
+    if (ok) {
+      const { stateMachine } = await import("./state");
+      await this.setState(stateMachine.getState());
+      logger.info(`[OrbControl] 球体主题已切换为 ${theme}`);
+    }
+    return ok;
+  }
 }
 
 export const orbController = new OrbController();

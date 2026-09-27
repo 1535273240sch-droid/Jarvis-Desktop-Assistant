@@ -1,4 +1,4 @@
-import { writeFile, mkdir } from "node:fs/promises";
+import { writeFile, mkdir, readFile } from "node:fs/promises";
 import { resolve, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -20,8 +20,9 @@ const server = await createServer({
 });
 
 try {
-  const [orbStates, codeExport] = await Promise.all([
+  const [orbStates, orbUniforms, codeExport] = await Promise.all([
     server.ssrLoadModule("/src/orb-states.ts"),
+    server.ssrLoadModule("/src/orb-uniforms.ts"),
     server.ssrLoadModule("/src/code-export.ts"),
   ]);
 
@@ -65,6 +66,65 @@ try {
   if (html.includes(ORIGINAL_FLOW)) html = html.replace(ORIGINAL_FLOW, AMPLIFIED_FLOW);
   else if (html.includes(PREVIOUS_FLOW)) html = html.replace(PREVIOUS_FLOW, AMPLIFIED_FLOW);
   else throw new Error("未能匹配音频流场强度（audioFlowStrengths）——请核对上游模板");
+
+  // —— 多主题注入 ——
+  //
+  // 用户提供的 5 套主题快照（scripts/orb-themes.json，来自 orb 编辑器导出，
+  // 只含 idle/thinking 两态、136 floats/态）。其余 4 个状态沿用 vendor 的
+  // 状态推导规则补齐（listening/executing/speaking/error 的颜色是全局固定
+  // 语义色——绿/琥珀/青/红，主题个性由 idle/thinking 承载），数值以用户
+  // 导出为准覆盖。
+  //
+  // 运行时通过 app://orb/orb.html?theme=<styleId> 选择主题；无参数回落 siri。
+  const USER_THEMES = JSON.parse(await readFile(resolve(projectRoot, "scripts/orb-themes.json"), "utf-8"));
+
+  // profile 数值键 -> uniform 数组下标（布局见 vendor/orb/src/orb-uniforms.ts writeOrbUniforms）
+  const PROFILE_NUMERIC_INDEX = {
+    speed: 3, zoom: 5, warp: 6, ridgeAmt: 7, sharp: 8, shade: 9, exposure: 14,
+    edgeGlow: 17, contourDeform: 21, bandDensity: 22, chromaticShift: 23,
+    metalStretch: 25, metalEvolution: 29, metalRoughness: 30, metalDepth: 31,
+    ribbonWidth: 34, ribbonTwist: 35, ribbonFold: 36, ribbonBreath: 37,
+  };
+  // 颜色键 -> uniform 数组起始下标（每色 4 floats: r,g,b,a）
+  const PROFILE_COLOR_OFFSET = {
+    colorA: 40, colorB: 44, colorC: 48, colorD: 52, highlightColor: 56, glowColor: 84,
+  };
+  const floatsToHex = (arr, off) => {
+    const h = (v) => Math.max(0, Math.min(255, Math.round(Number(v) * 255))).toString(16).padStart(2, "0");
+    return `#${h(arr[off])}${h(arr[off + 1])}${h(arr[off + 2])}`.toUpperCase();
+  };
+
+  const seedMatch = html.match(/^([ \t]*)const stateSeeds = (\{.*\});[ \t]*$/m);
+  if (!seedMatch) throw new Error("未能定位 stateSeeds 行——上游 orb 导出模板可能已变更");
+
+  const themeTable = { siri: JSON.parse(seedMatch[2]) };
+  for (const t of USER_THEMES) {
+    const baseCfg = orbStates.createPresetOrbStateConfiguration(t.style);
+    const thinkingParams = orbStates.resolveOrbStateParams(baseCfg, "thinking");
+    // 用用户导出的 thinking 快照覆盖 profile（保证与导出观感完全一致）
+    const overrides = {};
+    for (const [key, idx] of Object.entries(PROFILE_NUMERIC_INDEX)) overrides[key] = t.thinking[idx];
+    for (const [key, off] of Object.entries(PROFILE_COLOR_OFFSET)) overrides[key] = floatsToHex(t.thinking, off);
+    const cfg = orbStates.createOrbStateConfiguration({ ...thinkingParams, ...overrides });
+    // idle 同样以用户导出为准（idle 原本由 thinking 推导，这里保用户的数值）
+    const idleOverrides = {};
+    for (const [key, idx] of Object.entries(PROFILE_NUMERIC_INDEX)) idleOverrides[key] = t.idle[idx];
+    for (const [key, off] of Object.entries(PROFILE_COLOR_OFFSET)) idleOverrides[key] = floatsToHex(t.idle, off);
+    cfg.profiles.idle = { ...cfg.profiles.idle, ...idleOverrides };
+    themeTable[t.style] = Object.fromEntries(
+      orbStates.orbStateNames.map((n) => [n, orbUniforms.createOrbUniformSnapshot(orbStates.resolveOrbStateParams(cfg, n))])
+    );
+    console.log(`[Generate Orb] theme injected: ${t.style} (${t.name})`);
+  }
+
+  html = html.replace(
+    seedMatch[0],
+    `${seedMatch[1]}const __ORB_THEMES = ${JSON.stringify(themeTable)};\n` +
+      `${seedMatch[1]}const stateSeeds = (() => { try { const t = new URLSearchParams(location.search).get("theme"); ` +
+      `if (t && Object.prototype.hasOwnProperty.call(__ORB_THEMES, t)) return __ORB_THEMES[t]; } catch {} ` +
+      `return __ORB_THEMES.siri; })();`
+  );
+  console.log(`[Generate Orb] themes embedded: ${Object.keys(themeTable).join(", ")}`);
 
 
   // 注入宿主桥接脚本（就绪通知、onError 回调捕获、鼠标穿透交互与拖拽支持）
