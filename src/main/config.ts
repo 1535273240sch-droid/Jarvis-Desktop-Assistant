@@ -108,6 +108,69 @@ export const DEFAULT_CONFIG: JarvisConfig = {
   autoUpdate: false,
 };
 
+// [secret-guard patch] 外部 MCP 服务器配置的脱敏与还原
+const SECRET_SENTINEL = "***";
+const SECRET_FLAG_RE = /(^|--|-)[^\s=]*(key|token|secret|passwd|password|auth)/i;
+
+/** 对下发给渲染进程/日志的 mcpServers 做深度脱敏：env 值全掩码，args 中疑似密钥值掩码 */
+export function redactServerSecrets(servers: unknown): unknown {
+  if (!Array.isArray(servers)) return servers;
+  return servers.map((s) => {
+    if (!s || typeof s !== "object") return s;
+    const out = { ...(s as Record<string, unknown>) };
+    if (out.env && typeof out.env === "object") {
+      const e: Record<string, string> = {};
+      for (const k of Object.keys(out.env as Record<string, string>)) e[k] = SECRET_SENTINEL;
+      out.env = e;
+    }
+    if (Array.isArray(out.args)) {
+      const args = out.args as unknown[];
+      const flagIdx: number[] = [];
+      args.forEach((a, i) => {
+        if (typeof a === "string" && SECRET_FLAG_RE.test(a)) flagIdx.push(i);
+      });
+      out.args = args.map((a, i) => {
+        if (typeof a !== "string") return a;
+        if (flagIdx.includes(i) && a.includes("=")) return a.replace(/=.*$/, `=${SECRET_SENTINEL}`);
+        if (flagIdx.some((fi) => fi < i && !String(args[fi]).includes("=") && i === fi + 1)) return SECRET_SENTINEL;
+        return a;
+      });
+    }
+    return out;
+  });
+}
+
+/** 渲染层回传的配置带 *** 哨兵时，用存储中的真实值还原，避免保存后密钥丢失 */
+export function restoreServerSecrets(newServers: unknown, oldServers: unknown): unknown {
+  if (!Array.isArray(newServers)) return newServers;
+  const oldByName = new Map(
+    (Array.isArray(oldServers) ? oldServers : [])
+      .filter((s): s is Record<string, any> => Boolean(s) && typeof s === "object" && Boolean((s as any).name))
+      .map((s) => [(s as any).name as string, s as Record<string, any>])
+  );
+  return newServers.map((s) => {
+    if (!s || typeof s !== "object") return s;
+    const item = s as Record<string, any>;
+    if (!item.name) return item;
+    const old = oldByName.get(item.name);
+    if (!old) return item;
+    const out = { ...item };
+    if (out.env && typeof out.env === "object" && old.env && typeof old.env === "object") {
+      const fixed: Record<string, string> = {};
+      for (const [k, v] of Object.entries(out.env as Record<string, string>)) {
+        fixed[k] = v === SECRET_SENTINEL && (old.env as Record<string, string>)[k] !== undefined ? (old.env as Record<string, string>)[k] : v;
+      }
+      out.env = fixed;
+    }
+    if (Array.isArray(out.args) && Array.isArray(old.args)) {
+      out.args = (out.args as unknown[]).map((a, i) =>
+        a === SECRET_SENTINEL && typeof old.args[i] === "string" && old.args[i] !== SECRET_SENTINEL ? old.args[i] : a
+      );
+    }
+    return out;
+  });
+}
+
 class ConfigManager {
   private filePath: string;
   private config: JarvisConfig;
@@ -215,6 +278,13 @@ class ConfigManager {
     if (patch.instructions !== undefined && !String(patch.instructions).trim()) {
       patch = { ...patch, instructions: DEFAULT_INSTRUCTIONS };
     }
+    // [secret-guard patch] 渲染层回传的 mcpServers 可能带 *** 哨兵，用真实值还原
+    if (Array.isArray(patch.mcpServers)) {
+      patch = {
+        ...patch,
+        mcpServers: restoreServerSecrets(patch.mcpServers, this.config.mcpServers) as JarvisConfig["mcpServers"],
+      };
+    }
     // 用户显式保存时，一律带上最新版本号，避免下次启动被再次迁移覆盖
     this.config = { ...this.config, ...patch, configVersion: DEFAULT_CONFIG.configVersion };
     this.config.allowedDirectories = (this.config.allowedDirectories || []).filter(
@@ -238,6 +308,8 @@ class ConfigManager {
       apiKeyPresent: c.apiKey.length > 0,
       visionApiKey: c.visionApiKey ? `***${c.visionApiKey.slice(-4)}` : "",
       visionApiKeyPresent: Boolean(c.visionApiKey && c.visionApiKey.length > 0),
+      // [secret-guard patch] 外部 MCP 服务器配置（env 与 args 中的密钥）不下发明文
+      mcpServers: redactServerSecrets(c.mcpServers),
     };
   }
 

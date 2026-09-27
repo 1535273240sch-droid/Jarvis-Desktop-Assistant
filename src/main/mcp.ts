@@ -63,9 +63,34 @@ export class McpClient extends EventEmitter {
   private tools: McpTool[] = [];
   private initialized = false;
   private serverPkgPath = "";
+  // [supervisor patch] 崩溃自动重启的退避状态
+  private restartAttempts = 0;
+  private restartTimer: NodeJS.Timeout | null = null;
 
   isReady(): boolean {
     return this.initialized && this.proc !== null && !this.proc.killed;
+  }
+
+  /** [supervisor patch] 内置 MCP 崩溃自动重启：指数退避 2s/4s/8s/…/30s */
+  private scheduleMcpRestart(attempts: number): void {
+    this.restartAttempts = attempts;
+    if (this.restartTimer) clearTimeout(this.restartTimer);
+    const delayMs = Math.min(30000, 2000 * Math.pow(2, Math.max(0, attempts - 1)));
+    logger.info(`[MCP Supervisor] 将在 ${delayMs}ms 后自动重启内置 MCP（第 ${attempts} 次）`);
+    this.restartTimer = setTimeout(() => {
+      this.restartTimer = null;
+      if (this.proc || this.isReady()) return;
+      this.start()
+        .then((r) => {
+          if (r.ok) {
+            logger.info("[MCP Supervisor] 内置 MCP 已自动重启");
+          } else {
+            logger.warn(`[MCP Supervisor] 重启未成功：${r.reason}（继续退避重试）`);
+            this.scheduleMcpRestart(attempts + 1);
+          }
+        })
+        .catch(() => this.scheduleMcpRestart(attempts + 1));
+    }, delayMs);
   }
 
   getTools(): McpTool[] {
@@ -179,6 +204,9 @@ export class McpClient extends EventEmitter {
       }
       this.pending.clear();
       this.emit("exited", { code, signal });
+      // [supervisor patch] 崩溃自动重启；应用退出随进程消亡，无需停止路径
+      if (!configManager.get().mcpEnabled) return;
+      this.scheduleMcpRestart(this.restartAttempts + 1);
     });
     this.proc.on("error", (err) => {
       logger.error("[MCP] 子进程错误:", err.message);
@@ -194,6 +222,8 @@ export class McpClient extends EventEmitter {
       if (init.error) throw new Error(init.error.message);
       this.notify("notifications/initialized", {});
       this.initialized = true;
+      // [supervisor patch] 稳定运行后清零退避计数
+      this.restartAttempts = 0;
       logger.info("[MCP] 初始化完成");
     } catch (e) {
       const reason = `MCP 初始化失败：${(e as Error).message}`;

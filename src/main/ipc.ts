@@ -307,7 +307,8 @@ export function registerIpcHandlers(deps: Deps): void {
 
   ipcMain.handle(IPC.MCP_EXT_STATUS, async () => ({
     servers: externalMcp.status(),
-    configured: configManager.get().mcpServers || [],
+    // [secret-guard patch] 走脱敏视图，env/args 中的密钥不下发明文
+    configured: configManager.getMasked().mcpServers || [],
     tools: externalMcp.toModelTools().map((t: any) => t.function.name),
   }));
 

@@ -38,6 +38,7 @@ interface ServerRuntime {
   tools: Array<{ name: string; description?: string; inputSchema?: Record<string, unknown> }>;
   ready: boolean;
   lastError?: string;
+  restartTimer?: NodeJS.Timeout;
 }
 
 /** 把外部工具名规范化：加服务器前缀，并过滤 MCP/模型不允许的字符 */
@@ -49,6 +50,37 @@ export function prefixToolName(server: string, tool: string): string {
 
 class ExternalMcpManager extends EventEmitter {
   private servers = new Map<string, ServerRuntime>();
+  // [supervisor patch] 每个服务器的待执行重启定时器与退避计数（跨 rt 重建保持）
+  private respawnTimers = new Map<string, NodeJS.Timeout>();
+  private respawnAttempts = new Map<string, number>();
+
+  /** [supervisor patch] 崩溃自动重启：指数退避 2s/4s/8s/…/30s */
+  private scheduleRespawn(cfg: McpServerConfig, attempts: number): void {
+    const key = cfg.name;
+    this.respawnAttempts.set(key, attempts);
+    const prev = this.respawnTimers.get(key);
+    if (prev) clearTimeout(prev);
+    const delayMs = Math.min(30000, 2000 * Math.pow(2, Math.max(0, attempts - 1)));
+    logger.info(`[ExtMCP Supervisor] 「${key}」将在 ${delayMs}ms 后自动重启（第 ${attempts} 次）`);
+    const t = setTimeout(() => {
+      this.respawnTimers.delete(key);
+      const cur = this.servers.get(key);
+      if (!cur || cur.proc || cur.ready) return; // stopAll 已清理，或 startAll 已重建正常实例
+      this.startOne(cfg)
+        .then((ok) => {
+          if (ok) {
+            this.respawnAttempts.delete(key);
+            logger.info(`[ExtMCP Supervisor] 「${key}」已自动重启并重新发现工具`);
+            this.emit("tools");
+          } else {
+            const cur2 = this.servers.get(key);
+            if (cur2 && !cur2.proc && !cur2.ready) this.scheduleRespawn(cfg, attempts + 1);
+          }
+        })
+        .catch(() => this.scheduleRespawn(cfg, attempts + 1));
+    }, delayMs);
+    this.respawnTimers.set(key, t);
+  }
 
   /** 当前已就绪服务器的全部工具（含前缀名，可直接下发给模型） */
   toModelTools(): Array<Record<string, unknown>> {
@@ -155,6 +187,11 @@ class ExternalMcpManager extends EventEmitter {
         p.resolve({ jsonrpc: "2.0", id: -1, error: { code: -32000, message: "外部 MCP 子进程已退出" } });
       }
       rt.pending.clear();
+      // [supervisor patch] 崩溃自动重启；stopAll 清理后 / startAll 重建后自动失效
+      if (this.servers.get(cfg.name) === rt) {
+        const attempts = (this.respawnAttempts.get(cfg.name) || 0) + 1;
+        this.scheduleRespawn(cfg, attempts);
+      }
     });
     rt.proc.on("error", (err) => {
       rt.lastError = err.message;
@@ -196,6 +233,10 @@ class ExternalMcpManager extends EventEmitter {
   }
 
   stopAll(): void {
+    // [supervisor patch] 主动停止时撤销所有待执行的重启计划
+    for (const t of this.respawnTimers.values()) clearTimeout(t);
+    this.respawnTimers.clear();
+    this.respawnAttempts.clear();
     for (const rt of this.servers.values()) {
       if (rt.proc) {
         try {
