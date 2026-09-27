@@ -308,7 +308,8 @@ const BUILTIN_TOOLS = [
         "生成一首歌并立即在 Jarvis 中播放。用户说「想听歌」「唱首歌」「给我唱一首」「来点音乐」「生成一首歌」等时**必须**用这个工具，" +
         "不要只是口头答应或说自己不会唱。把用户的话转写成 caption（曲风 + 人声 + 情绪 + 节奏，例如「轻快的流行女声，温暖治愈，中速」）；" +
         "用户提供了歌词就放进 lyrics（可带 [Verse 1]/[Chorus 1] 结构标签）；只想要纯音乐时 instrumental=true（此时不要传 lyrics）。" +
-        "注意：生成一首完整歌曲需要 1~3 分钟，调用前请先用一句话告诉用户你正在为他创作，不要反复催促。",
+        "注意：生成一首完整歌曲需要 1~3 分钟。调用后**立即**用一句话告诉用户你正在为他创作、让他稍等，" +
+        "不要在这里等待结果、也不要重复调用本工具——生成完成会自动播放并通知用户。",
       parameters: {
         type: "object",
         properties: {
@@ -1130,30 +1131,40 @@ class Orchestrator {
         const instrumental = args.instrumental === true;
         const lyrics = typeof args.lyrics === "string" ? args.lyrics.trim() : "";
 
-        // 生成是 1~3 分钟的长任务，用 onProgress 让用户实时听到进度，而不是干等
-        const song = await musicStudio.createSong({
-          caption,
-          lyrics: lyrics || undefined,
-          instrumental,
-          onProgress: (msg) => this.notifySystem(`🎵 ${msg}`),
-        });
-        if (!song.ok || !song.audioBase64) {
-          return {
-            ok: false,
-            output: `歌曲生成失败：${song.reason || "未知原因"}。请如实告知用户，不要声称已经生成。`,
-          };
+        // 生成一首歌要 1~3 分钟。这里**不同步等待**：语音链路等一个几分钟的工具结果
+        // 会让用户长时间听不到任何回应，也容易被服务端判为工具调用超时。
+        // 改为立即回执 + 后台生成，完成后自动播放并播报，用户全程有反馈。
+        if (musicStudio.isRunning()) {
+          return { ok: true, output: "已经有一首歌正在创作中，请告诉用户稍等，不要重复提交。" };
         }
+        void musicStudio
+          .createSong({
+            caption,
+            lyrics: lyrics || undefined,
+            instrumental,
+            onProgress: (msg) => this.notifySystem(`🎵 ${msg}`),
+          })
+          .then((song) => {
+            if (!song.ok || !song.audioBase64) {
+              this.notifySystem(`❌ 歌曲生成失败：${song.reason || "未知原因"}`);
+              return;
+            }
+            const title = song.caption || caption;
+            // 推给渲染层用 Web Audio 播放（球体频谱会随之律动）
+            this.broadcast(IPC.MUSIC_PLAY, { audioBase64: song.audioBase64, mime: "audio/mpeg", title });
+            const lyricSummary = song.lyrics ? song.lyrics.replace(/\s+/g, " ").slice(0, 80) : "纯音乐";
+            this.notifySystem(
+              `🎵 歌曲已生成并开始播放：${title}（${lyricSummary}）` +
+                (song.filePath ? `\n文件：${song.filePath}` : "")
+            );
+          })
+          .catch((e) => this.notifySystem(`❌ 歌曲生成异常：${(e as Error)?.message || e}`));
 
-        const title = song.caption || caption;
-        // 推给渲染层用 Web Audio 播放（球体频谱会随之律动）
-        this.broadcast(IPC.MUSIC_PLAY, { audioBase64: song.audioBase64, mime: "audio/mpeg", title });
-        const lyricSummary = song.lyrics ? song.lyrics.replace(/\s+/g, " ").slice(0, 120) : "（纯音乐，无歌词）";
         return {
           ok: true,
           output:
-            `歌曲已生成并开始在 Jarvis 中播放。风格：${title}；歌词摘要：${lyricSummary}。` +
-            (song.filePath ? `音频文件已保存到：${song.filePath}。` : "") +
-            `请用一句话告诉用户「歌已经生成并开始播放」。`,
+            "已开始创作，通常 1~3 分钟完成，完成后会自动播放并通知用户。" +
+            "请用一句话告诉用户你在为他写歌、让他稍等，不要在这里等待或反复调用本工具。",
         };
       }
 
