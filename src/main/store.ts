@@ -56,9 +56,11 @@ export class WindowStore {
     }
   }
 
-  getValidatedBounds(): { x: number; y: number; width: number; height: number } {
-    const width = this.state.width || DEFAULT_SIZE;
-    const height = this.state.height || DEFAULT_SIZE;
+  getValidatedBounds(sizeOverride?: number): { x: number; y: number; width: number; height: number } {
+    // sizeOverride：配置里的 orbSize 优先于 store 的旧尺寸。位置仍用已保存的，
+    // 尺寸与默认落位（右下角）都按新尺寸计算，避免球体大小变了却贴不到边。
+    const width = sizeOverride || this.state.width || DEFAULT_SIZE;
+    const height = sizeOverride || this.state.height || DEFAULT_SIZE;
 
     const primaryDisplay = screen.getPrimaryDisplay();
     const { workArea } = primaryDisplay;

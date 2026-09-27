@@ -309,6 +309,16 @@
   input::placeholder, textarea::placeholder { color: #94a3b8; }
   textarea { resize: none; }
 
+  /* 滑块与勾选框：去掉通用输入框的槽状背景/内边距，避免 range 被压成怪异长条 */
+  input[type="range"] {
+    padding: 0; background: transparent; border: none; box-shadow: none;
+    accent-color: #e2e8f0; cursor: pointer;
+  }
+  input[type="range"]:focus { box-shadow: none; }
+  input[type="checkbox"] {
+    width: auto; padding: 0; box-shadow: none; accent-color: #e2e8f0; cursor: pointer;
+  }
+
   /* ---------------- 晶莹实体玻璃/金属按键 ---------------- */
 
   button {
@@ -611,6 +621,21 @@
             <button id="btnApplyOrbTheme">应用</button>
           </div>
           <div class="hint">切换后悬浮球重载一次（约 1-2 秒），六个状态（空闲/聆听/思考/执行/播报/错误）都会按该主题配色。设置会保存，重启后保持。</div>
+        </div>
+
+        <div class="field">
+          <label>悬浮球尺寸</label>
+          <div class="row">
+            <input id="orbSize" type="range" min="80" max="400" step="1" value="260" style="flex:1" />
+            <span id="orbSizeVal" class="hint" style="min-width:52px; text-align:right">260 px</span>
+          </div>
+          <div class="row">
+            <label style="display:flex; align-items:center; gap:8px; font-size:12px; color:var(--silver-3); cursor:pointer">
+              <input id="orbAutoScale" type="checkbox" />
+              随状态自适应（聆听 ×1.06 / 播报 ×1.12）
+            </label>
+          </div>
+          <div class="hint">拖动滑块实时生效并保存（窗口本身不可拖边框缩放，尺寸只由代码设置）；自适应在基准尺寸上轻微放大，关闭后立即恢复基准。</div>
         </div>
 
         <div class="field">
@@ -1375,6 +1400,13 @@ async function loadConfig() {
     if ($('musicEnabled')) $('musicEnabled').value = c.musicEnabled === false ? 'off' : 'on';
     // 悬浮球主题回显
     if ($('orbTheme')) $('orbTheme').value = c.orbTheme || 'siri';
+    // 悬浮球尺寸与自适应回显
+    if ($('orbSize')) {
+      const s = Number(c.orbSize) || 260;
+      $('orbSize').value = String(s);
+      if ($('orbSizeVal')) $('orbSizeVal').textContent = s + ' px';
+    }
+    if ($('orbAutoScale')) $('orbAutoScale').checked = Boolean(c.orbAutoScale);
     // 人设提示词：未编辑过则显示当前生效值
     if ($('instructions') && !$('instructions').dataset.dirty) {
       $('instructions').value = c.instructions || '';
@@ -1397,6 +1429,28 @@ $('btnApplyOrbTheme').onclick = async () => {
     toast('主题切换失败：' + (e && e.message ? e.message : e));
   }
 };
+
+/* ---------------- 悬浮球尺寸 ---------------- */
+
+let orbSizePersistTimer = null;
+$('orbSize').addEventListener('input', () => {
+  const n = Number($('orbSize').value) || 260;
+  $('orbSizeVal').textContent = n + ' px';
+  // 实时生效：走专用通道直接改窗口尺寸（保持球心、无磁盘写入）
+  api.orbSetSize(n);
+  // 持久化节流：避免拖动时每移动一像素都写一次配置文件
+  clearTimeout(orbSizePersistTimer);
+  orbSizePersistTimer = setTimeout(() => { api.setConfig({ orbSize: n }); }, 250);
+});
+
+$('orbAutoScale').addEventListener('change', async () => {
+  try {
+    await api.setConfig({ orbAutoScale: $('orbAutoScale').checked });
+    toast($('orbAutoScale').checked ? '已开启随状态自适应' : '已关闭自适应，恢复基准尺寸');
+  } catch (e) {
+    toast('设置失败：' + (e && e.message ? e.message : e));
+  }
+});
 
 $('voiceSelect').onchange = () => {  if ($('voiceSelect').value === 'custom') {
     $('customVoiceInput').style.display = 'inline-block';

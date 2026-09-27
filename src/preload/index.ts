@@ -28,6 +28,8 @@ const orbBridge = {
   startDrag: (screenX: number, screenY: number) => send("window:start-drag", { screenX, screenY }),
   stopDrag: () => send("window:stop-drag", {}),
   quit: () => send("window:quit", {}),
+  // 主进程广播当前球体尺寸（窗口尺寸变化时），球体据此更新命中半径
+  onOrbSizeChanged: (cb: Listener) => on("orb:size-changed", cb),
 };
 
 /** 聊天面板用的 API */
@@ -36,6 +38,8 @@ const panelApi = {
   orbGetState: () => invoke("orb:get-state"),
   orbSetState: (state: string) => invoke("orb:set-state", state),
   orbSetAudioBands: (bands?: unknown) => invoke("orb:set-audio-bands", bands),
+  // 设置悬浮球基准尺寸（保持球心、持久化、广播）
+  orbSetSize: (size: number) => invoke("orb:set-size", size),
 
   // 会话
   sessionStart: () => invoke("session:start"),

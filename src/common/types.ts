@@ -292,6 +292,16 @@ export interface JarvisConfig {
   musicBaseUrl?: string;
   /** 音乐生成专属 API Key（可选，为空则沿用主 apiKey） */
   musicApiKey?: string;
+  /**
+   * 悬浮球基准尺寸（像素，钳制在 80~400，默认 260）。
+   * 窗口 resizable:false，尺寸只由代码设置，不开放边框拖拽；此值即「手动尺寸」。
+   */
+  orbSize?: number;
+  /**
+   * 是否让悬浮球随助手状态轻微自适应缩放（默认关闭）。
+   * 开启后仅在 orbSize 基准上乘倍率（聆听 ×1.06 / 播报 ×1.12），不改写基准。
+   */
+  orbAutoScale?: boolean;
 }
 
 /* ------------------------------------------------------------------ */
@@ -305,6 +315,9 @@ export const IPC = {
   ORB_GET_STATE: "orb:get-state",
   ORB_SET_STATE: "orb:set-state",
   ORB_SET_AUDIO_BANDS: "orb:set-audio-bands",
+  // 悬浮球尺寸：渲染 → 主请求设置尺寸；主 → 渲染广播当前生效尺寸
+  ORB_SET_SIZE: "orb:set-size",
+  ORB_SIZE_CHANGED: "orb:size-changed",
 
   // —— 窗口交互 ——
   WINDOW_SET_IGNORE_MOUSE: "window:set-ignore-mouse",
