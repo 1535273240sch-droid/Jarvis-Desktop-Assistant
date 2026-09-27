@@ -400,6 +400,21 @@ class ConfigManager {
     return this.get();
   }
 
+  /**
+   * 判断某个键是否在用户配置文件里显式写过。
+   * 用于区分「用户设定过的值」与「代码里的默认值」——例如球体尺寸升级兼容：
+   * 配置里没写过 orbSize 时，应沿用 store 里已保存的尺寸，而不是套用默认 260。
+   */
+  hasExplicitKey(key: string): boolean {
+    try {
+      if (!fs.existsSync(this.filePath)) return false;
+      const stored = JSON.parse(fs.readFileSync(this.filePath, "utf-8"));
+      return Boolean(stored) && Object.prototype.hasOwnProperty.call(stored, key);
+    } catch {
+      return false;
+    }
+  }
+
   /** 脱敏视图：可安全下发给渲染进程或写日志 */
   getMasked(): Record<string, unknown> {
     const c = this.get();

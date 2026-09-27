@@ -59,12 +59,28 @@ let orbWindow: BrowserWindow | null = null;
 let panelWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 
+/**
+ * 解析悬浮球基准尺寸。
+ *
+ * 配置里**显式**写过 orbSize 就用配置（用户用滑块调过就会写进去）；
+ * 没写过则沿用 store 里已保存的窗口尺寸，避免升级到带「尺寸可调」的版本后，
+ * 老用户原本的球体被默认值 260 突然缩小。解析结果写回配置，保证滑块显示与实际一致。
+ */
+function resolveOrbBaseSize(): number {
+  const cfg = configManager.get();
+  if (configManager.hasExplicitKey("orbSize")) return clampOrbSize(cfg.orbSize);
+  const stored = windowStore.getValidatedBounds();
+  const size = clampOrbSize(stored.width);
+  if (size !== cfg.orbSize) {
+    configManager.set({ orbSize: size });
+    logger.info(`[OrbSize] 升级兼容：以已保存的球体尺寸 ${size}px 作为基准`);
+  }
+  return size;
+}
+
 /** 球体悬浮窗：透明、无边框、置顶、可拖动（点击穿透由页面内脚本控制） */
 function createOrbWindow(): BrowserWindow {
-  // 配置里的 orbSize 优先于 store 里的旧尺寸（覆盖旧值），位置仍沿用已保存的位置。
-  const cfgSize = configManager.get().orbSize;
-  const sizeOverride = cfgSize !== undefined ? clampOrbSize(cfgSize) : undefined;
-  const bounds = windowStore.getValidatedBounds(sizeOverride);
+  const bounds = windowStore.getValidatedBounds(resolveOrbBaseSize());
   const win = new BrowserWindow({
     x: bounds.x,
     y: bounds.y,
@@ -531,7 +547,7 @@ app.whenReady().then(async () => {
   orbController.attach(orbWindow);
   // 2b) 悬浮球尺寸：应用配置里的基准尺寸；订阅状态机以支持「随状态自适应」
   orbSizeManager.attach(orbWindow);
-  orbSizeManager.init(configManager.get().orbSize, configManager.get().orbAutoScale ?? false);
+  orbSizeManager.init(resolveOrbBaseSize(), configManager.get().orbAutoScale ?? false);
   stateMachine.on("change", (e: { to: AssistantState }) => orbSizeManager.onStateChanged(e.to));
   orbSizeManager.onStateChanged(stateMachine.getState());
   panelWindow = createPanelWindow();
