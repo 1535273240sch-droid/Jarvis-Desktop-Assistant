@@ -616,29 +616,45 @@ app.whenReady().then(async () => {
   initAutoUpdater();
 
   // 7) 球体加载完成后的健康检查
+  //
+  // 自检口径经过一次真机实测修正：**球体能渲染出画面**才是 WebGPU 可用的最直接证据。
+  // 全新安装首次启动时 Chromium 的 GPU 进程是冷的、着色器缓存为空，探针拿 adapter
+  // 实测可能超过 10s；若据此弹「WebGPU 不可用」模态框，就会出现「球体明明在正常渲染
+  // 却弹出报错」的误报（本机实测确实发生过，第二次启动预热后同一探针仅需约 0.5s）。
+  // 因此分两种口径：
+  //   球体已就绪 → 探针只用于记录适配器信息；失败仅告警 + 面板提示，绝不弹模态框。
+  //   球体未就绪 → 才用模态框把「大概率是 WebGPU/驱动问题」明确告诉用户。
   orbWindow.webContents.on("did-finish-load", async () => {
     logger.info("球体页面加载完成");
     const ready = await orbController.waitReady(8000);
     if (!ready) {
       logger.warn("球体在 8 秒内未就绪");
-    } else {
-      const gpu = await orbController.checkWebGPU();
-      if (!gpu.supported) {
-        logger.error(`WebGPU 自检未通过：${gpu.error}`);
-        if (!isSelfTest) {
-          dialog.showErrorBox(
-            "WebGPU 硬件加速不可用",
-            `Jarvis 悬浮球依赖 WebGPU，但自检未通过：\n\n${gpu.error}\n\n建议：\n1. 更新显卡驱动\n2. 确认系统已开启硬件加速\n3. 确认显卡支持 WebGPU（DirectX 12 及以上）`
-          );
-        }
-      } else {
-        logger.info(`WebGPU 自检通过：${JSON.stringify(gpu.adapterInfo)}`);
-      }
+    }
 
-      // 未配置 Key 时给出明确指引，而不是静默不动
-      if (!configManager.hasApiKey() && !isSelfTest) {
-        logger.warn("尚未配置 StepFun API Key");
+    const gpu = await orbController.checkWebGPU();
+    if (gpu.supported) {
+      logger.info(`WebGPU 自检通过：${JSON.stringify(gpu.adapterInfo)}`);
+    } else if (ready) {
+      logger.warn(`WebGPU 探测未通过（但球体已就绪并在正常渲染）：${gpu.error}`);
+      const p = panelWindow;
+      if (p && !p.isDestroyed()) {
+        p.webContents.send(IPC.CHAT_MESSAGE, {
+          systemNotice: `提示：WebGPU 探测未通过（${gpu.error}），但悬浮球已正常渲染。若球体显示异常，请检查显卡驱动。`,
+        });
       }
+    } else {
+      logger.error(`WebGPU 自检未通过：${gpu.error}`);
+      if (!isSelfTest) {
+        dialog.showErrorBox(
+          "WebGPU 硬件加速不可用",
+          `Jarvis 悬浮球依赖 WebGPU，但自检未通过：\n\n${gpu.error}\n\n建议：\n1. 更新显卡驱动\n2. 确认系统已开启硬件加速\n3. 确认显卡支持 WebGPU（DirectX 12 及以上）`
+        );
+      }
+    }
+
+    // 未配置 Key 时给出明确指引，而不是静默不动
+    if (!configManager.hasApiKey() && !isSelfTest) {
+      logger.warn("尚未配置 StepFun API Key");
     }
 
     if (isSelfTest) {

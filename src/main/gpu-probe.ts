@@ -32,8 +32,15 @@ const PROBE_URL = "app://panel/gpu-probe.html";
 /** 结果缓存 TTL：避免用户在设置面板反复点按钮时反复开窗 */
 const CACHE_TTL_MS = 60_000;
 
-/** 单次探测整体超时 */
-const PROBE_TIMEOUT_MS = 10_000;
+/**
+ * 单次探测整体超时。
+ *
+ * 定为 30s 是实测结论：全新安装后的**首次**启动，Chromium 的 GPU 进程是冷的、
+ * 着色器缓存也是空的，隐藏窗口里 requestAdapter 实测超过 10s；此时超时就会在
+ * 球体明明能正常渲染的情况下误报「WebGPU 不可用」。缓存预热后同一台机器实测
+ * 只需约 0.5s。因此这里放宽到 30s，宁可慢也不误报。
+ */
+const PROBE_TIMEOUT_MS = 30_000;
 
 /**
  * 探测表达式：与原 orb-control.checkWebGPU() 中的那段逐字段等价

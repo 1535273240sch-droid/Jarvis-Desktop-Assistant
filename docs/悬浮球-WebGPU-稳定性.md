@@ -52,8 +52,12 @@
 
 - **为什么**：旧实现跑在**球体自己的渲染进程**里，对球体正用于维持活跃设备的同一个 `GPUAdapter` 再 `requestDevice()` 出第二个 device 并立即 `destroy()`，是需要排除的干扰源；Dawn 的 `A valid external Instance reference no longer exists` 属 instance 生命周期类错误。
 - **怎么做的**：新建 `src/main/gpu-probe.ts`（单例 `gpuProbe`）与探针页 `src/renderer/gpu-probe.html`（极简静态页，无脚本、无 UI）；`checkWebGPU()` 改为 `return gpuProbe.check();`，**方法签名与返回结构 `{ supported, adapterInfo?, error? }` 不变**。窗口参数：`show:false`、1×1、`contextIsolation:true`、`nodeIntegration:false`、`sandbox:true`、`backgroundThrottling:false`，不加载 preload；加载 `app://panel/gpu-probe.html` 后用 `executeJavaScript` 注入探测表达式（`requestAdapter` → `requestDevice` → `device.destroy`）。
-- **四项保护**：成功结果缓存 60s（失败不缓存，可立即重试）、并发去重（`inflight`，同一时刻只跑一个）、单次整体超时 10s、`app` 未就绪时直接返回失败不开窗。
+- **四项保护**：成功结果缓存 60s（失败不缓存，可立即重试）、并发去重（`inflight`，同一时刻只跑一个）、单次整体超时 **30s**、`app` 未就绪时直接返回失败不开窗。
 - **入口**：启动时、托盘「WebGPU 自检」、面板「重跑 WebGPU 自检」。
+- **启动时的判定口径（真机实测后修正）**：**球体能渲染出画面**才是 WebGPU 可用的最直接证据。全新安装首次启动时 GPU 进程是冷的、着色器缓存为空，探针取 adapter 可能超过 10s（本机实测首启超时、第二次启动预热后同一探针约 0.5s）。因此：
+  - 球体已就绪 → 探针只用于记录适配器信息，失败仅告警 + 面板提示，**不弹模态框**（避免「球体正常渲染却报错」的误报）；
+  - 球体未就绪 → 才弹模态框明确告知「大概率是 WebGPU/驱动问题」。
+  - 超时上限也因此从 10s 放宽到 30s。
 
 > 这**只消除了一个已确认的干扰源**，**不等于**定位了「设备约每 60 秒丢失」的根因。
 
