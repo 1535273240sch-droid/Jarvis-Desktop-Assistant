@@ -27,8 +27,17 @@
     const status = document.querySelector("#status");
     let animationFrame = 0;
     let device = null;
+    let adapter = null;
     let ribbonTarget = null;
     let stopped = false;
+    let restartTimer = null;
+    let restartAttempts = 0;
+    let starting = false;
+    let exhausted = false;
+    // 设备丢失后只做少量快速重试（约 15s），仍失败则上报宿主重载页面兜底。
+    const maxRestartAttempts = 5;
+    const restartBaseDelayMs = 500;
+    const restartMaxDelayMs = 8000;
     let state = "idle";
     let transitionTargetState = state;
     let fromUniforms = new Float32Array(stateSeeds[state]);
@@ -127,12 +136,22 @@
       }),
     });
 
+    function teardownGpu() {
+      cancelAnimationFrame(animationFrame);
+      animationFrame = 0;
+      ribbonTarget?.destroy();
+      ribbonTarget = null;
+      device?.destroy();
+      device = null;
+      lastFrameAt = null;
+    }
+
+    // 终态错误：不再尝试恢复（例如超出重建上限）。
     function stopWithError(error) {
       if (stopped) return;
       stopped = true;
-      cancelAnimationFrame(animationFrame);
-      ribbonTarget?.destroy();
-      device?.destroy();
+      if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
+      teardownGpu();
       status.hidden = false;
       const msg = error instanceof Error ? error.message : String(error);
       status.textContent = msg;
@@ -142,11 +161,40 @@
       }
     }
 
+    // 设备断开/渲染异常后按退避策略重建，避免一次断连就永久黑屏。
+    function scheduleRestart(reason) {
+      if (stopped || exhausted || restartTimer) return;
+      if (restartAttempts >= maxRestartAttempts) {
+        exhausted = true;
+        stopWithError(new Error(`WebGPU 设备反复断开，已停止重建（${maxRestartAttempts} 次）：${reason}`));
+        return;
+      }
+      const delay = Math.min(restartMaxDelayMs, restartBaseDelayMs * 2 ** restartAttempts);
+      restartAttempts += 1;
+      console.warn(`[orb] 将在 ${delay}ms 后重建 WebGPU 设备（第 ${restartAttempts} 次）：${reason}`);
+      restartTimer = setTimeout(() => {
+        restartTimer = null;
+        if (stopped) return;
+        // start() 内部已处理失败并会再次排程，这里兜底同样走重建而不是终态停止。
+        start().catch((error) => {
+          scheduleRestart(error instanceof Error ? error.message : String(error));
+        });
+      }, delay);
+    }
+
     async function start() {
+      if (stopped || starting || exhausted) return;
+      starting = true;
+      try {
       if (!navigator.gpu) throw new Error("WebGPU is not supported in this environment.");
-      const adapter = await navigator.gpu.requestAdapter();
+      // GPU 进程重启期间 requestAdapter 可能返回 null，或返回已失效的缓存
+      // adapter。每次重建都重新申请，避免复用坏引用而一直失败。
+      adapter = await navigator.gpu.requestAdapter();
       if (!adapter) throw new Error("No compatible WebGPU adapter was found.");
-      device = await adapter.requestDevice();
+      const nextDevice = await adapter.requestDevice();
+      if (stopped) { nextDevice.destroy(); return; }
+      device = nextDevice;
+      const boundDevice = device;
       const context = canvas.getContext("webgpu");
       if (!context) throw new Error("Unable to create a WebGPU canvas context.");
 
@@ -248,15 +296,25 @@
       });
       let ribbonCompositeBindGroup = null;
       device.lost.then((info) => {
-        stopWithError(new Error(`WebGPU device lost: ${info.message || info.reason}`));
+        if (stopped || device !== boundDevice) return;
+        if (info.reason === "destroyed") return;
+        const reason = info.message || info.reason;
+        teardownGpu();
+        if (typeof onErrorCallback === "function") {
+          try { onErrorCallback(`WebGPU 设备已断开，正在重建：${reason}`); } catch (e) { console.error(e); }
+        }
+        scheduleRestart(reason);
       });
       device.addEventListener("uncapturederror", (event) => {
+        // 未捕获的 WebGPU 校验错误多数是良性的（且已被 preventDefault 抑制），
+        // 真正的设备故障会走 device.lost。这里只记录，不上报宿主，
+        // 避免宿主因一次校验告警就重载整个球体页面。
         event.preventDefault();
-        stopWithError(new Error(`WebGPU rendering error: ${event.error.message}`));
+        console.error(`[orb] WebGPU uncaptured error: ${event.error.message}`);
       });
 
       function frame(now) {
-        if (stopped) return;
+        if (stopped || device !== boundDevice) return;
         try {
           const dpr = Math.min(window.devicePixelRatio || 1, 2);
           const width = Math.max(1, Math.floor(canvas.clientWidth * dpr));
@@ -329,23 +387,44 @@
           pass.draw(3);
           pass.end();
           device.queue.submit([encoder.finish()]);
+          restartAttempts = 0;
           animationFrame = requestAnimationFrame(frame);
         } catch (error) {
-          stopWithError(error);
+          // 渲染循环内抛出通常意味着设备已不可用：清理并尝试重建。
+          const msg = error instanceof Error ? error.message : String(error);
+          teardownGpu();
+          if (typeof onErrorCallback === "function") {
+            try { onErrorCallback(msg); } catch (e) { console.error(e); }
+          }
+          scheduleRestart(msg);
         }
       }
 
       animationFrame = requestAnimationFrame(frame);
+      } catch (error) {
+        // 初始化失败：丢弃 adapter 以便下次重新申请。
+        adapter = null;
+        teardownGpu();
+        throw error;
+      } finally {
+        starting = false;
+      }
     }
 
     window.addEventListener("pagehide", () => {
       stopped = true;
+      if (restartTimer) { clearTimeout(restartTimer); restartTimer = null; }
       cancelAnimationFrame(animationFrame);
       ribbonTarget?.destroy();
       device?.destroy();
     }, { once: true });
     start().catch((error) => {
-      stopWithError(error);
+      const msg = error instanceof Error ? error.message : String(error);
+      console.error(error);
+      if (typeof onErrorCallback === "function") {
+        try { onErrorCallback(msg); } catch (e) { console.error(e); }
+      }
+      scheduleRestart(msg);
     });
   </script>
 

@@ -38,8 +38,47 @@ interface Deps {
 export function registerIpcHandlers(deps: Deps): void {
   /* ---------------- 球体窗口事件 ---------------- */
 
+  // 球体渲染失败后的宿主侧兜底恢复。
+  //
+  // 渲染器内部先做约 15s 的快速重试；仍失败才来到这里。GPU 进程被驱动复位
+  // 或系统回收后，Chromium 重启它需要一定时间（实测约 60s），期间任何页面内
+  // 重建都拿不到 adapter。因此宿主重载需要比渲染器更持久：间隔 10s、最多 6 次，
+  // 覆盖约 60s，既能等到 GPU 进程回来，又能避免无限重载。
+  let orbRecoverAttempts = 0;
+  let orbRecoverTimer: NodeJS.Timeout | null = null;
+  const ORB_RECOVER_MAX = 6;
+  const ORB_RECOVER_DELAY_MS = 10000;
+
+  function scheduleOrbRecovery(reason: string): void {
+    if (orbRecoverTimer) return;
+    if (orbRecoverAttempts >= ORB_RECOVER_MAX) {
+      logger.warn(`[IPC] 球体恢复已达上限（${ORB_RECOVER_MAX} 次），停止自动重载：${reason}`);
+      return;
+    }
+    orbRecoverAttempts += 1;
+    logger.warn(`[IPC] 将在 ${ORB_RECOVER_DELAY_MS}ms 后重载球体页面（第 ${orbRecoverAttempts} 次）：${reason}`);
+    orbRecoverTimer = setTimeout(async () => {
+      orbRecoverTimer = null;
+      const win = deps.getOrbWindow();
+      if (!win || win.isDestroyed()) {
+        logger.warn("[IPC] 球体恢复失败：窗口不可用");
+        return;
+      }
+      orbController.attachTarget(win);
+      const theme = configManager.get().orbTheme || "siri";
+      const ok = await orbController.reloadWithTheme(theme);
+      logger.info(`[IPC] 球体恢复重载${ok ? "成功" : "失败"}`);
+    }, ORB_RECOVER_DELAY_MS);
+  }
+
   ipcMain.on(IPC.ORB_ON_READY, (_e, state: string) => {
     logger.info(`[IPC] 球体已就绪，初始状态：${state}`);
+    // 渲染恢复正常，清空恢复计数与待执行的恢复定时器。
+    orbRecoverAttempts = 0;
+    if (orbRecoverTimer) {
+      clearTimeout(orbRecoverTimer);
+      orbRecoverTimer = null;
+    }
     orbController.markReady();
   });
 
@@ -52,6 +91,8 @@ export function registerIpcHandlers(deps: Deps): void {
         systemNotice: `⚠️ 球体渲染异常：${msg}\n（若为 WebGPU 相关，请检查显卡驱动）`,
       });
     }
+    // 渲染器自身重建失败或 GPU 进程级故障时，由宿主重载页面兜底。
+    scheduleOrbRecovery(msg);
   });
 
   /* ---------------- 球体控制 ---------------- */

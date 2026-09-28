@@ -134,7 +134,20 @@ try {
     (function() {
       let isReadyReported = false;
       let isInsideOrb = false;
-      const orbRadius = 110; // 悬浮球交互有效半径（居中）
+      // 命中半径按窗口尺寸推导（比例 0.42，260px 窗口时约 110px）。
+      // 写死 110 会导致窗口放大后点击/拖动区域与球体视觉错位，故随尺寸同步。
+      const ORB_RADIUS_RATIO = 0.42;
+      let orbRadius = 110;
+
+      function updateOrbRadius() {
+        orbRadius = Math.min(window.innerWidth, window.innerHeight) * ORB_RADIUS_RATIO;
+      }
+      updateOrbRadius();
+      window.addEventListener("resize", updateOrbRadius);
+      // 主进程改窗口尺寸后会广播新尺寸；即使 resize 事件未触发也能及时刷新
+      if (window.electronBridge && typeof window.electronBridge.onOrbSizeChanged === "function") {
+        window.electronBridge.onOrbSizeChanged(updateOrbRadius);
+      }
 
       function probeReady() {
         if (window.liquidOrb && typeof window.liquidOrb.getState === "function") {
