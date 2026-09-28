@@ -14,8 +14,10 @@
  *   3b. 产物完整性    —— orb.html 必须是完整 HTML（防模板字符串提前结束导致静默截断）
  *   4. 宿主兜底参数   —— ORB_RECOVER_MAX=6、ORB_RECOVER_DELAY_MS=10000，
  *                        且 ORB_ON_ERROR 触发重建、ORB_ON_READY 清零计数
- *   5. 音频参数分档   —— 产物 audioRules 等于调音常量；audioFlowStrengths 中默认主题强度
- *                        与常量一致，5 套主题各按自己的基准分档且落在 (0, 3] 区间
+ *   5. 音频参数一致   —— 产物 audioRules 等于调音常量；默认主题强度与常量一致，且 5 套主题
+ *                        不被单独降/升档（未登记风格由 defaultAudioStrength 回退到同一档）
+ *   6. 主题颜色贯穿   —— 每套主题的 listening/executing/speaking/error 必须用自身调色板，
+ *                        不得再被 vendor 的固定语义色（青/绿/琥珀/红）覆盖
  *
  * 用法：node scripts/verify-orb-recovery.mjs   （需先 npm run build）
  */
@@ -244,9 +246,11 @@ try {
       check(canon(gotRules) === canon(expectedRules),
         "产物 audioRules 等于期望放大值", canon(gotRules));
 
-      // audioFlowStrengths 现在由生成器「按主题分档」计算（见 scripts/generate-orb.mjs）：
-      // 默认主题的强度必须与调音常量一致（默认主题的手感不允许被改动），其余风格键
-      // 由生成器按各主题基准 + 高光参数收敛算出，这里只校验它们存在且落在合理区间。
+      // 需求：**所有主题的声音动态与默认主题一致**。实现方式是「主题风格不单独登记强度」，
+      // 由运行时回退到 defaultAudioStrength（= 默认主题的查表值）。这里把这条要求固化：
+      // ① 默认主题的强度必须等于调音常量（默认手感不允许被改）；
+      // ② 5 套主题的流场索引若出现在表里，其值必须等于默认档（不允许被单独降/升档）；
+      // ③ 回退表达式必须取自默认主题的查表值（否则未登记风格会变成完全不响应）。
       const defaultIdx = "9";
       check(Number(gotFlow[defaultIdx]) === Number(expectedFlow[defaultIdx]),
         `默认主题(siri, 索引 ${defaultIdx})的音频强度与调音常量一致`,
@@ -256,15 +260,22 @@ try {
       check(missingBase.length === 0,
         "产物保留了全部基础风格强度键", missingBase.length ? "缺少：" + missingBase.join(", ") : Object.keys(expectedFlow).join(", "));
 
-      const vals = Object.entries(gotFlow);
-      const bad = vals.filter(([, v]) => !Number.isFinite(v) || v <= 0 || v > 3);
-      check(bad.length === 0,
-        "所有音频强度均在 (0, 3] 区间内（生成器的收敛上限）", bad.length ? JSON.stringify(bad) : `${vals.length} 个键`);
-      // 主题分档：用户 5 套主题的流场索引必须各自有独立强度，避免回退到同一档而再次过驱
+      const defaultStrength = Number(expectedFlow[defaultIdx]);
       const themeIdx = ["13", "15", "20", "23", "24"];
-      const missingTheme = themeIdx.filter((k) => !(k in gotFlow));
-      check(missingTheme.length === 0,
-        "5 套主题各自的音频强度已按主题分档写入", missingTheme.length ? "缺少：" + missingTheme.join(", ") : themeIdx.map((k) => `${k}:${gotFlow[k]}`).join(" "));
+      const deviating = themeIdx
+        .filter((k) => k in gotFlow)
+        .filter((k) => Number(gotFlow[k]) !== defaultStrength)
+        .map((k) => `${k}=${gotFlow[k]}`);
+      check(deviating.length === 0,
+        "5 套主题的音频强度与默认主题同档（无单独降档）",
+        deviating.length
+          ? "偏离默认档：" + deviating.join(", ")
+          : `全部等于 ${defaultStrength}（或未登记 → 运行时回退到该值）`);
+
+      const defExpr = html.match(/const defaultAudioStrength = ([^;]*);/);
+      check(Boolean(defExpr) && /audioFlowStrengths\s*\[\s*\d+\s*\]/.test(defExpr[1]),
+        "defaultAudioStrength 取自默认主题的查表值（未登记风格与默认主题同档）",
+        defExpr ? defExpr[1] : "(not found)");
     }
   }
 } catch (e) {
@@ -279,41 +290,57 @@ try {
   check(Boolean(tm), "产物中存在 __ORB_THEMES 主题表");
   if (tm) {
     const themes = JSON.parse(tm[1]);
-    // 颜色在 uniform 快照中的偏移（与 scripts/generate-orb.mjs 的 PROFILE_COLOR_OFFSET 一致）
-    const COLOR_OFFSETS = [40, 44, 48, 52, 56, 84];
     const STATES_NON_IDLE = ["listening", "executing", "speaking", "error"];
-    const rgb = (seed, off) => [0, 1, 2].map((k) => Number(seed[off + k]).toFixed(4)).join(",");
-    const hexOf = (seed, off) =>
-      "#" + [0, 1, 2].map((k) => Math.max(0, Math.min(255, Math.round(seed[off + k] * 255))).toString(16).padStart(2, "0")).join("").toUpperCase();
 
-    // vendor 里写死的固定语义色（出现即说明覆盖没生效）
-    const SEMANTIC = new Set(["#00E5FF", "#1DE9B6", "#00B0FF", "#64FFDA", "#38EF7D", "#11998E", "#00C9FF", "#92FE9D", "#FFB300", "#FF6F00", "#FF8F00", "#FFA000", "#FF1744", "#D50000"]);
+    // 规则：4 个非 idle 状态的颜色**取自主题自己的配色**（逐键保留色相），亮度对齐到该
+    // 状态原本的设计。断言：① 不得残留 vendor 的固定语义色；② 色相要贴近主题主色
+    // （否则等于又跑回固定色）；③ 亮度不得被推到接近纯白（否则整颗会糊成白盘）。
+    const SEMANTIC = new Set(["#00E5FF", "#1DE9B6", "#00B0FF", "#64FFDA", "#38EF7D", "#11998E", "#00C9FF", "#92FE9D", "#FFB300", "#FF6F00", "#FF8F00", "#FFA000", "#FF1744", "#D50000", "#FFFFFF"]);
+    const rgbOf = (seed, off) => [0, 1, 2].map((k) => Number(seed[off + k]));
+    const lum = ([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    const hueOf = ([r, g, b]) => {
+      const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+      if (d < 1e-6) return null; // 近灰：无色相可言
+      let h;
+      if (max === r) h = 60 * (((g - b) / d) % 6);
+      else if (max === g) h = 60 * ((b - r) / d + 2);
+      else h = 60 * ((r - g) / d + 4);
+      return ((h % 360) + 360) % 360;
+    };
+    const hueDelta = (a, b) => { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; };
 
+    const COLOR_OFFSETS = [40, 44, 48, 52, 56, 84];
     const leaked = [];
-    const mismatched = [];
+    const hueFar = [];
+    const tooBright = [];
     for (const name of Object.keys(themes)) {
       const table = themes[name];
-      if (!table || !table.thinking) { mismatched.push(`${name}: 缺少 thinking`); continue; }
+      if (!table || !table.thinking) continue;
+      const themeHue = hueOf(rgbOf(table.thinking, 40));
       for (const st of STATES_NON_IDLE) {
         const seed = table[st];
-        if (!seed) { mismatched.push(`${name}/${st}: 缺少状态种子`); continue; }
+        if (!seed) continue;
+        const c = rgbOf(seed, 40);
+        const hex = "#" + c.map((v) => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, "0")).join("").toUpperCase();
+        if (SEMANTIC.has(hex)) leaked.push(`${name}/${st}=${hex}`);
+        const h = hueOf(c);
+        if (themeHue !== null && h !== null && hueDelta(h, themeHue) > 40) hueFar.push(`${name}/${st} Δhue=${hueDelta(h, themeHue).toFixed(0)}°`);
         for (const off of COLOR_OFFSETS) {
-          if (rgb(seed, off) !== rgb(table.thinking, off)) mismatched.push(`${name}/${st}@${off}`);
+          if (off === 56) continue; // 56 = highlightColor（高光色），vendor 设计本就是白色
+          const l = lum(rgbOf(seed, off));
+          if (l > 0.88) tooBright.push(`${name}/${st}@${off}=${l.toFixed(2)}`);
         }
-        if (SEMANTIC.has(hexOf(seed, 40))) leaked.push(`${name}/${st}=${hexOf(seed, 40)}`);
       }
     }
-    check(mismatched.length === 0,
-      "每套主题的 listening/executing/speaking/error 均使用自身调色板",
-      mismatched.length ? "偏离：" + mismatched.slice(0, 6).join(", ") : "6 套主题 × 4 状态");
-    check(leaked.length === 0,
-      "不再出现 vendor 的固定语义色（青/绿/琥珀/红）",
-      leaked.length ? leaked.join(", ") : "无");
+    check(leaked.length === 0, "不再出现 vendor 的固定语义色（青/绿/琥珀/红/纯白）", leaked.length ? leaked.slice(0, 5).join(", ") : "无");
+    check(hueFar.length === 0, "各状态主色的色相贴近主题主色（≤40°）", hueFar.length ? hueFar.slice(0, 5).join(", ") : "6 套主题 × 4 状态");
+    check(tooBright.length === 0, "状态配色亮度未被推到接近纯白（避免糊成白盘）", tooBright.length ? tooBright.slice(0, 5).join(", ") : "全部 ≤ 0.88");
 
-    // 主题之间必须真的不同（否则等于又退化成全局常量）
-    const speakingColors = Object.keys(themes).map((n) => hexOf(themes[n].speaking, 40));
-    check(new Set(speakingColors).size >= 4,
-      "各主题说话态颜色互不相同", speakingColors.join(" "));
+    const speakingColors = Object.keys(themes).map((n) => {
+      const c = rgbOf(themes[n].speaking, 40);
+      return "#" + c.map((v) => Math.max(0, Math.min(255, Math.round(v * 255))).toString(16).padStart(2, "0")).join("").toUpperCase();
+    });
+    check(new Set(speakingColors).size >= 4, "各主题说话态颜色互不相同", speakingColors.join(" "));
   }
 } catch (e) {
   check(false, "主题颜色检查", e.message);

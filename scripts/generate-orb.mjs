@@ -20,14 +20,12 @@ const server = await createServer({
 });
 
 try {
-  const [orbStates, orbUniforms, codeExport, audioTuning, orbPresets] = await Promise.all([
+  const [orbStates, orbUniforms, codeExport, audioTuning] = await Promise.all([
     server.ssrLoadModule("/src/orb-states.ts"),
     server.ssrLoadModule("/src/orb-uniforms.ts"),
     server.ssrLoadModule("/src/code-export.ts"),
     server.ssrLoadModule("/src/orb-audio-tuning.ts"),
-    server.ssrLoadModule("/src/presets.ts"),
   ]);
-  const styleFlowIndexes = orbPresets.styleFlowIndexes;
 
   // 选择支持音频响应的 siri 预设
   const config = orbStates.createPresetOrbStateConfiguration("siri");
@@ -92,6 +90,88 @@ try {
     const h = (v) => Math.max(0, Math.min(255, Math.round(Number(v) * 255))).toString(16).padStart(2, "0");
     return `#${h(arr[off])}${h(arr[off + 1])}${h(arr[off + 2])}`.toUpperCase();
   };
+  // HSL 互转：用于「色相/饱和度取主题、亮度取该状态原本设计」的颜色迁移
+  const hexToHsl = (hex) => {
+    const m = /^#?([0-9a-f]{6})$/i.exec(String(hex || ""));
+    if (!m) return { h: 0, s: 0, l: 0.5 };
+    const int = parseInt(m[1], 16);
+    const r = ((int >> 16) & 255) / 255;
+    const g = ((int >> 8) & 255) / 255;
+    const b = (int & 255) / 255;
+    const max = Math.max(r, g, b);
+    const min = Math.min(r, g, b);
+    const l = (max + min) / 2;
+    const d = max - min;
+    let h = 0;
+    let s = 0;
+    if (d > 0) {
+      s = d / (1 - Math.abs(2 * l - 1));
+      if (max === r) h = 60 * (((g - b) / d) % 6);
+      else if (max === g) h = 60 * ((b - r) / d + 2);
+      else h = 60 * ((r - g) / d + 4);
+    }
+    if (h < 0) h += 360;
+    return { h, s: Math.max(0, Math.min(1, s)), l: Math.max(0, Math.min(1, l)) };
+  };
+  const hslToHex = (h, s, l) => {
+    const hh = ((h % 360) + 360) % 360;
+    const ss = Math.max(0, Math.min(1, s));
+    const ll = Math.max(0, Math.min(1, l));
+    const c = (1 - Math.abs(2 * ll - 1)) * ss;
+    const x = c * (1 - Math.abs(((hh / 60) % 2) - 1));
+    const m = ll - c / 2;
+    const seg = Math.floor(hh / 60) % 6;
+    const rgb = [[c, x, 0], [x, c, 0], [0, c, x], [0, x, c], [x, 0, c], [c, 0, x]][seg];
+    const to = (v) => Math.max(0, Math.min(255, Math.round((v + m) * 255))).toString(16).padStart(2, "0");
+    return `#${to(rgb[0])}${to(rgb[1])}${to(rgb[2])}`.toUpperCase();
+  };
+  /**
+   * 求一组颜色的「代表色相」与「平均彩度」，用于把 vendor 的状态配色迁移到主题色系。
+   *
+   * 为什么不能直接对单个颜色取 HSL 再套主题色相：近白色（例如 frost 的 #F7FBFF，或
+   * 导出的 0.97/0.98/1.0）算出来的 saturation 会因为分母 (1-|2l-1|) 趋零而**失真成 1.0**，
+   * 于是「接近白色」被读成「饱和的某个随机色相」。所以这里用彩度加权的圆均值求整体色相，
+   * 并用「平均彩度」表达这组颜色到底有多"上色"（近白/近灰 ≈ 0）。
+   */
+  const paletteHueAndChroma = (hexList) => {
+    const cols = hexList.map(hexToHsl);
+    let x = 0, y = 0, chromaSum = 0;
+    for (const c of cols) {
+      const chroma = c.s * (1 - Math.abs(2 * c.l - 1)); // ≈ max-min，真正的"彩度"
+      chromaSum += chroma;
+      const rad = (c.h * Math.PI) / 180;
+      x += Math.cos(rad) * chroma;
+      y += Math.sin(rad) * chroma;
+    }
+    const n = cols.length || 1;
+    const hue = x === 0 && y === 0 ? 0 : ((Math.atan2(y, x) * 180) / Math.PI + 360) % 360;
+    return { hue, chroma: chromaSum / n };
+  };
+  const rgbOfHex = (hex) => {
+    const i = parseInt(String(hex).replace("#", ""), 16);
+    return [((i >> 16) & 255) / 255, ((i >> 8) & 255) / 255, (i & 255) / 255];
+  };
+  const lumOfRgb = ([r, g, b]) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  /**
+   * 把主题的某个颜色**缩放到目标亮度**，保留它的色相与色彩比例。
+   *
+   * 这是「主题色进状态」的稳妥做法：主题的配色是给 idle/thinking 设计的，直接搬进
+   * speaking 这类**额外加强辉光/曝光**的状态会顶到纯白（真机实测 frost 说话态 100% 像素
+   * 纯白、整颗糊成白盘）。改用「亮度对齐」后：颜色仍是主题的（逐键保留其色相与色彩关系），
+   * 亮度则换成该状态原本设计好的亮度，因此既不会爆白，也不会灰成一片。
+   * 近黑颜色（blueDrop 的 #020B1D）按色相 + 目标亮度重建，避免大倍数放大造成通道截断。
+   */
+  const scaleColorToLum = (hex, targetLum) => {
+    const c = rgbOfHex(hex);
+    const l = lumOfRgb(c);
+    if (l < 0.02) {
+      const hsl = hexToHsl(hex);
+      return hslToHex(hsl.h, Math.max(hsl.s, 0.55), Math.min(0.95, Math.max(0.25, targetLum)));
+    }
+    const k = targetLum / l;
+    const out = c.map((v) => Math.max(0, Math.min(1, v * k)));
+    return "#" + out.map((v) => Math.round(v * 255).toString(16).padStart(2, "0")).join("").toUpperCase();
+  };
 
   const seedMatch = html.match(/^([ \t]*)const stateSeeds = (\{.*\});[ \t]*$/m);
   if (!seedMatch) throw new Error("未能定位 stateSeeds 行——上游 orb 导出模板可能已变更");
@@ -121,32 +201,51 @@ try {
     // 各状态的运动特征（speed / warp / contourDeform / edgeGlow …）保持原样，
     // 状态之间的区分改由「动感强弱 + 亮度」承载。vendored 运行时不改，
     // 覆盖只发生在宿主构建期（与音频放大参数的注入方式一致）。
-    const themeColorPatch = {};
+    // 状态配色：颜色用**主题自己的**（逐键保留色相与色彩关系），亮度对齐到该状态原本
+    // 设计好的亮度。于是任何状态都呈现主题的配色，同时不会因为 speaking 等状态额外加强
+    // 辉光/曝光而顶到纯白（真机实测：直接沿用主题色的绝对亮度，frost 说话态 100% 像素纯白）。
+    const themeCols = {};
     for (const [key, off] of Object.entries(PROFILE_COLOR_OFFSET)) {
-      themeColorPatch[key] = floatsToHex(t.thinking, off);
+      themeCols[key] = floatsToHex(t.thinking, off);
     }
     for (const n of orbStates.orbStateNames) {
       if (n === "idle" || n === "thinking") continue;
-      cfg.profiles[n] = { ...cfg.profiles[n], ...themeColorPatch };
+      const vendorParams = orbStates.resolveOrbStateParams(baseCfg, n);
+      const patch = {};
+      for (const [key] of Object.entries(PROFILE_COLOR_OFFSET)) {
+        patch[key] = scaleColorToLum(themeCols[key], lumOfRgb(rgbOfHex(vendorParams[key])));
+      }
+      cfg.profiles[n] = { ...cfg.profiles[n], ...patch };
     }
+    console.log(`[Generate Orb] ${t.style} 状态配色：使用主题配色并把亮度对齐到各状态原设计`);
     themeTable[t.style] = Object.fromEntries(
       orbStates.orbStateNames.map((n) => [n, orbUniforms.createOrbUniformSnapshot(orbStates.resolveOrbStateParams(cfg, n))])
     );
     console.log(`[Generate Orb] theme injected: ${t.style} (${t.name})`);
   }
 
-  // 默认主题（siri）同样处理：它在导出模板里自带 6 态种子，其中那 4 个状态同样是固定
-  // 语义色。若只改导入主题，就会出现「默认主题会随状态变色、其它主题反而不变」的新不一致。
-  // 这里用 siri 自己的 thinking 调色板覆盖那 4 个状态的颜色，规则与导入主题完全一致。
-  const siriStates = themeTable.siri;
-  if (siriStates && siriStates.thinking) {
-    for (const n of Object.keys(siriStates)) {
-      if (n === "idle" || n === "thinking") continue;
-      for (const off of Object.values(PROFILE_COLOR_OFFSET)) {
-        for (let k = 0; k < 4; k++) siriStates[n][off + k] = siriStates.thinking[off + k];
+  // 默认主题（siri）同样处理：它的 6 态种子自带 vendor 的固定语义色。规则与导入主题一致
+  // —— 颜色用 siri 自己的调色板，亮度对齐到各状态原本的设计。若只改导入主题，就会出现
+  // 「默认主题随状态变色、其它主题反而不变」的新不一致。
+  const siriSeedTable = themeTable.siri;
+  if (siriSeedTable && siriSeedTable.thinking) {
+    const siriCols = {};
+    for (const [key, off] of Object.entries(PROFILE_COLOR_OFFSET)) {
+      siriCols[key] = floatsToHex(siriSeedTable.thinking, off);
+    }
+    for (const n of ["listening", "executing", "speaking", "error"]) {
+      const seed = siriSeedTable[n];
+      if (!seed) continue;
+      for (const [key, off] of Object.entries(PROFILE_COLOR_OFFSET)) {
+        const targetLum = lumOfRgb(rgbOfHex(floatsToHex(seed, off)));
+        const hex = scaleColorToLum(siriCols[key], targetLum);
+        const int = parseInt(hex.slice(1), 16);
+        seed[off] = ((int >> 16) & 255) / 255;
+        seed[off + 1] = ((int >> 8) & 255) / 255;
+        seed[off + 2] = (int & 255) / 255;
       }
     }
-    console.log("[Generate Orb] 默认主题 siri 的 4 个状态颜色也已对齐到自身调色板");
+    console.log("[Generate Orb] 默认主题 siri 的 4 个状态配色：主题配色 + 亮度对齐到状态原设计");
   }
 
   html = html.replace(
@@ -158,95 +257,32 @@ try {
   );
   console.log(`[Generate Orb] themes embedded: ${Object.keys(themeTable).join(", ")}`);
 
-  // —— 音频强度表：逐索引约束，保证「不超过默认主题」——
+  // —— 音频强度表 ——
   //
-  // 真机实测发现的问题：放大规则（比例项 2.6）把形变放大约 6.4 倍。各主题的放大倍数
-  // 相近，但**基准值差别很大**，于是绝对值天差地别：
-  //   siri  speaking 的 v3（全局形变强度）基准 0.94 → 施加后 6.8（观感正常）
-  //   frost speaking 的 v3 基准 2.55 → 施加后顶到上限 14 → 表面撕裂成斑块（观感崩坏）
-  // 更隐蔽的是：只按某一个索引（如 v3）对齐还不够 —— 那会把 v3 基准小的主题
-  // （refractiveBlob / particleRibbon）强度**调高**，导致曝光(v14)、涟漪(v7)等其它
-  // 索引反而超过默认主题，出现整片过曝（实测确实发生）。
+  // 这里**故意不做按主题分档**：需求是「所有主题的声音动态与默认主题一致」，而运行时
+  // 对未登记风格的回退值恰好就是默认主题的强度（产物里 defaultAudioStrength =
+  // audioFlowStrengths[siri]）。所以只要不把主题风格写进表里，它们就自动与默认主题同档。
   //
-  // 因此规则取「逐索引上限的最小值」：对每条音频规则 i，解出使本主题响应恰好等于
-  // 默认主题响应的强度，再取所有索引中的最小值：
-  //   v_base*(1 + p*level) + a*level = target_i（默认主题在同频段下的响应）
-  //   level = (target_i - v_base) / (p*v_base + a)，strength_i = level / REF_BAND
-  //   strength = min_i(strength_i)
-  // 效果：每个受控索引的响应都**不超过**默认主题，即「至少不会比默认主题更夸张」。
-  // 结果与默认主题的强度一起写进 audioFlowStrengths（按流场索引），运行时查表即可。
-  // 参考频段能量：说话/播报时的典型峰值（按各规则自己的频段取值）
-  const REF_BANDS = { all: 0.8, mid: 0.7, low: 0.9, high: 0.5 };
-  const siriFlowIndex = styleFlowIndexes.siri;
-  const siriStrength = Number(audioTuning.amplifiedAudioFlowStrengths[String(siriFlowIndex)]);
-  const responseOf = (base, rule, strength) => {
-    const [, band, additive, proportional] = rule;
-    const level = (REF_BANDS[band] ?? 0.8) * strength;
-    return base * (1 + proportional * level) + additive * level;
-  };
-  const siriSeed = themeTable.siri.speaking;
-  /** 逐索引算出「该主题响应恰好等于默认主题」的强度；取最小值即为不超默认的上限 */
-  const strengthCapsFor = (seed) =>
-    audioTuning.amplifiedAudioRules.map((rule) => {
-      const [idx, band, additive, proportional] = rule;
-      const base = Number(seed[idx]);
-      const target = responseOf(Number(siriSeed[idx]), rule, siriStrength);
-      const denom = proportional * base + additive;
-      if (denom <= 0) return siriStrength;
-      const level = (target - base) / denom;
-      if (level <= 0) return 0; // 基准已不低于默认主题的响应，没有余量
-      return level / (REF_BANDS[band] ?? 0.8);
-    });
-  // 个别风格还要再收敛：particleRibbon（粒子丝带）靠海量叠加的半透明粒子/丝带绘制，
-  // 本身就已经「半透明白」（实测基线近白像素 12.8%、饱和度仅 0.49）。形变会把它直接
-  // 推向纯白：同样是 2.6 的强度，默认主题音频只增加 7.1% 近白像素，它却增加 37.9%。
-  // 这类风格对形变的容忍度低得多，故额外乘以一个收敛系数。
-  const STYLE_EXTRA_ATTENUATION = { particleRibbon: 0.2 };
-  const themeStrengths = {};
-  // 高光/玻璃类参数：gloss=11、shellMidAlpha=12、glassOpacity=20（布局见
-  // vendor/orb/src/orb-uniforms.ts 的 writeOrbUniforms）。这三项越高，形变产生的陡梯度
-  // 越容易把高光推到纯白。实测（同音量下统计球体像素）：
-  //   siri          0.24/0.18/0.44 → 白像素 7%
-  //   blueDrop      0.42/0.32/0.66 → 白像素 39%（各索引都已不超过默认主题，仍然过曝）
-  //   refractiveBlob 0.52/0.42/0.82 → 白像素 45%，饱和度从 0.96 掉到 0.25
-  // 所以再按这三项相对默认主题的几何平均收敛一次（1.5 次幂），且只降不升（上限 1）。
-  const GLOW_KEYS = [11, 12, 20];
-  const glowFactor = (seed) => {
-    const ratios = GLOW_KEYS.map((i) => {
-      const themeVal = Number(seed[i]);
-      const siriVal = Number(siriSeed[i]);
-      return themeVal > 0.001 ? siriVal / themeVal : 1;
-    });
-    const geo = Math.exp(ratios.reduce((sum, r) => sum + Math.log(r), 0) / ratios.length);
-    return Math.min(1, Math.pow(geo, 1.5));
-  };
-  console.log(
-    `[Generate Orb] 音频强度约束：默认主题强度 ${siriStrength}；先按「所有受控索引不超过默认主题」取上限，再按高光参数收敛`
-  );
-
-  for (const t of USER_THEMES) {
-    const caps = strengthCapsFor(themeTable[t.style].speaking);
-    const cap = Math.min(...caps);
-    const factor = glowFactor(themeTable[t.style].speaking);
-    const styleFactor = STYLE_EXTRA_ATTENUATION[t.style] ?? 1;
-    // 夹到合理区间：既不能为 0（那等于没有动态），也不能超过默认主题的上限
-    const strength = Number(Math.max(0.25, Math.min(3, cap * factor * styleFactor)).toFixed(3));
-    themeStrengths[styleFlowIndexes[t.style]] = strength;
-    console.log(
-      `[Generate Orb] 音频强度 ${t.style}: ${strength}` +
-        `（索引上限 ${cap.toFixed(2)} × 高光收敛 ${factor.toFixed(2)} × 风格收敛 ${styleFactor}）`
-    );
-  }
-
+  // 曾经做过「逐索引上限 + 高光收敛 + 风格收敛」的一套压制，起因是在浏览器里看到
+  // 非默认主题过曝。后来查明那是**观测工具失真**：同一主题、同一强度、同一音量，
+  // 浏览器里渲染成斑驳状，而真机（Electron）里是光滑干净的。在已安装应用里注入强音频
+  // 逐状态截图分析像素后确认：默认强度下各主题的过曝量与默认主题同级
+  // （frost 近白像素 5.8% / 饱和度 0.855，siri 7.1% / 0.841），**并不存在过驱问题**。
+  // 因此压制逻辑已全部移除，保持与默认主题一致（用户明确选择）。
   const audioFlowPattern = /const audioFlowStrengths = \{[^}]*\};/;
   if (!audioFlowPattern.test(html)) {
     throw new Error(
       "未能在导出模板中定位 audioFlowStrengths 对象字面量，请核对 vendor/orb 的 code-export/orb-audio 输出"
     );
   }
-  const audioFlowMap = { ...audioTuning.amplifiedAudioFlowStrengths, ...themeStrengths };
-  html = html.replace(audioFlowPattern, `const audioFlowStrengths = ${JSON.stringify(audioFlowMap)};`);
-  console.log(`[Generate Orb] audioFlowStrengths: ${JSON.stringify(audioFlowMap)}`);
+  html = html.replace(
+    audioFlowPattern,
+    `const audioFlowStrengths = ${JSON.stringify(audioTuning.amplifiedAudioFlowStrengths)};`
+  );
+  console.log(
+    `[Generate Orb] audioFlowStrengths: ${JSON.stringify(audioTuning.amplifiedAudioFlowStrengths)}` +
+      "（主题风格不登记，运行时回退到默认主题强度 = 与默认主题同档）"
+  );
 
 
   // 注入宿主桥接脚本（就绪通知、onError 回调捕获、鼠标穿透交互与拖拽支持）
