@@ -1,66 +1,49 @@
-# Windows-MCP 接入说明（v1.2.0）
+# Windows-MCP 接入说明
 
-> 本文档说明 v1.2.0 版本**改动了什么、新增了什么**，以及如何启用和使用 Windows 桌面控制能力。
+> 说明 Jarvis 如何接入外部 MCP「Windows 桌面控制」，以及它与内置方案的分工、启用与排障。
 
-## 一、这次改动的内容
+## 一、它是什么
 
-| 项 | 说明 |
-|---|---|
-| 改动文件 | `src/main/mcp-presets.ts`（新增预设）、`README.md`（新增章节）、`package.json`（版本 1.1.0 → 1.2.0）、本文档 |
-| 新增能力 | 外部 MCP 预设「Windows 桌面控制（Windows-MCP）」 |
-| 接入的项目 | [CursorTouch/Windows-MCP](https://github.com/CursorTouch/Windows-MCP)（7k+ stars，MIT 协议，Python 实现） |
-| 兼容性 | 不改动任何既有功能；Windows-MCP 以**外部 stdio MCP 服务器**方式挂载，未启用时 Jarvis 行为与之前完全一致 |
+接入社区项目 [CursorTouch/Windows-MCP](https://github.com/CursorTouch/Windows-MCP)（MIT 协议，Python 实现），以**外部 stdio MCP 服务器**方式挂载，未启用时 Jarvis 行为不变。
 
-### 为什么要接入它
+与内置方案的**分工**：
 
-Jarvis 内置的 MCP（DesktopCommander）强在**终端与文件编辑**，桌面操作走的是「截图 + 视觉模型猜坐标」路线。Windows-MCP 补齐的是另一条路线——**UIA 无障碍树**：
+| 方案 | 路线 | 特点 |
+|---|---|---|
+| Jarvis 内置（DesktopCommander） | 终端与文件编辑 + 「截图 + 视觉模型猜坐标」 | 通用 |
+| Windows-MCP | **UIA 无障碍树**直读控件结构 | 不猜坐标、点击更准；文本快照比截图省 token；补齐注册表、剪贴板、通知、窗口管理等系统级能力 |
 
-- 直接读取控件树结构，不依赖视觉模型猜坐标，点击更准；
-- 文本形式的 UI 快照比截图省大量 token；
-- 带来一批 Jarvis 原本没有的系统级能力（注册表、剪贴板、通知、窗口管理等）。
+工具名自动加 `windows_mcp__` 前缀，调用同样经过安全闸门（高危确认 + `audit.jsonl` 审计），急停快捷键有效。注册表读写、进程查杀等属高危操作，会触发确认窗。
 
-### 新增的 19 个工具（启用后以 `windows_mcp__` 前缀暴露给模型）
+## 二、启用的工具
 
 | 类别 | 工具 |
 |---|---|
-| 桌面感知 | `Snapshot`（UIA 控件树快照）、`DisplayInventory`（显示器枚举） |
-| 鼠标键盘 | `Click`、`Type`、`Scroll`、`Move`（拖拽）、`Shortcut`（组合键）、`Wait`、`WaitFor` |
-| 窗口管理 | `App`（启动/缩放/移动/切换窗口） |
-| 系统设施 | `Clipboard`、`Notification`（系统通知）、`Registry`（注册表读写）、`Process`（进程列出/查杀）、`PowerShell` |
+| 桌面感知 | `Snapshot`（UIA 控件树快照）、`DisplayInventory` |
+| 鼠标键盘 | `Click`、`Type`、`Scroll`、`Move`、`Shortcut`、`Wait`、`WaitFor` |
+| 窗口管理 | `App`（启动 / 缩放 / 移动 / 切换窗口） |
+| 系统设施 | `Clipboard`、`Notification`、`Registry`、`Process`、`PowerShell` |
 | 文件与网页 | `FileSystem`、`Scrape`（网页抓取）、`MultiSelect`、`MultiEdit` |
 
-**默认排除了 `Screenshot` 工具**：Jarvis 自带视觉通道已能截图送模型分析，且 MCP 图片类工具结果 Jarvis 的编排器暂不做多模态渲染，排除后避免模型选到无效工具。如需开启，去掉配置里的 `--exclude-tools Screenshot` 参数即可。
+**默认排除 `Screenshot`**：Jarvis 自带视觉通道已能截图送模型，且 MCP 图片类结果暂不做多模态渲染。需要时去掉 `--exclude-tools Screenshot` 即可。
 
-## 二、如何启用
+## 三、安装与启用
 
-### 方式一：面板一键安装（v1.3.19 起推荐）
+### 面板一键安装（推荐）
 
-面板 → MCP 设置 → 点「**一键安装 Windows 桌面控制**」。Jarvis 会自动完成：
-1. 检测是否已安装（PATH 或 uv 默认目录）；
-2. 缺 uv 时下载便携版 uv（官方源，失败自动切国内镜像）到 userData/tools/uv/；
-3. `uv tool install windows-mcp`（托管 Python 走 npmmirror 镜像，PyPI 失败自动重试 TUNA 备用源）；
-4. 把 windows-mcp.exe **绝对路径**写入外部 MCP 配置并立即重连 —— 避免了 PATH 未生效导致启动失败的问题。
+面板 → MCP 设置 → 「一键安装 Windows 桌面控制」。Jarvis 自动完成：检测是否已装 → 缺 uv 时下载便携版 uv（官方源，失败切国内镜像）→ `uv tool install windows-mcp`（PyPI 失败自动重试 TUNA 备用源）→ 把 `windows-mcp.exe` **绝对路径**写入外部 MCP 配置并**立即重连**，将新工具下发给模型。进度以系统提示显示在聊天区。
 
-进度以系统提示实时显示在聊天区。安装完成后，启动语音会话时日志出现 `[ExtMCP] 「windows-mcp」发现 19 个工具` 即挂载成功。
-
-### 方式二：手动安装
+### 手动安装
 
 需要 Python ≥ 3.14（推荐用 [uv](https://docs.astral.sh/uv/) 管理，不污染系统环境）：
 
 ```powershell
-# 1. 安装 uv（已安装可跳过）
 powershell -ExecutionPolicy Bypass -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# 2. 安装 windows-mcp（uv 会自动下载对应版本的 Python，无需手动装）
 uv tool install windows-mcp
-
-# 3. 验证
-windows-mcp serve --help
+windows-mcp serve --help   # 验证
 ```
 
-### 在 Jarvis 中启用
-
-面板 → MCP 设置 → 从预设中选择「**Windows 桌面控制（Windows-MCP）**」→ 启用。等价的手写配置：
+随后在 面板 → MCP 设置 → 选择预设「Windows 桌面控制（Windows-MCP）」→ 启用。等价手写配置：
 
 ```json
 {
@@ -71,16 +54,12 @@ windows-mcp serve --help
 }
 ```
 
-外部 MCP 在**会话首次建立时后台启动**（不阻塞对话），日志中看到 `[ExtMCP] 「windows-mcp」发现 19 个工具` 即为挂载成功。所有调用走 Jarvis 既有安全闸门（高危确认、审计日志）。
+外部 MCP 在**会话首次建立时后台启动**（不阻塞对话）。日志出现 `[ExtMCP] 「windows-mcp」发现 19 个工具` 即挂载成功。
 
-## 三、踩坑记录（重要）
+## 四、排障
 
-1. **不要依赖 `uvx` 临时拉起**：`uvx windows-mcp` 每次启动都可能联网解析包元数据。若机器上有失效的代理配置（如残留的 `127.0.0.1:7897`），uv 会重试 3 次后失败，导致外部 MCP 初始化超时。**用 `uv tool install` 装成独立 exe 再让 Jarvis 直接拉起，零联网依赖**，这也是预设默认采用 `command: "windows-mcp"` 的原因。
-2. **首次启动慢属正常**：`uv tool install` 首次要下载托管版 Python 3.14 与约 90 个依赖包；装完后 Jarvis 侧冷启动约 2 秒。
-3. **`--transport stdio` 必须显式指定**：`windows-mcp` 的 CLI 不带子命令会直接报错退出（`Missing command`），Jarvis 预设已带全参数。
-
-## 四、安全说明
-
-- Windows-MCP 侧自带 `--auth-key`、IP 白名单等远程访问防护（本预设使用本地 stdio，不暴露网络端口，不涉及）；
-- 所有工具调用经 Jarvis 的 `safety.js` 闸门与 `audit.jsonl` 审计，急停快捷键仍然有效；
-- 注册表/进程查杀属高危操作，触发确认窗，需人工批准。
+| 现象 | 原因与处理 |
+|---|---|
+| 初始化超时 / 反复失败 | 不要用 `uvx` 临时拉起（每次可能联网解析包元数据，代理失效时会重试失败）；用 `uv tool install` 装成独立 exe 再拉起，零联网依赖 |
+| 首次启动慢 | 正常：需下载托管 Python 3.14 与约 90 个依赖；装完后冷启动约 2 秒 |
+| 启动即报 `Missing command` | `--transport stdio` 须显式指定，预设已带全参数 |
