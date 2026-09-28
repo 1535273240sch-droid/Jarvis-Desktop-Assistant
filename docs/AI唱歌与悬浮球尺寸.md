@@ -14,7 +14,7 @@
 | :--- | :--- |
 | 文本生成歌曲 | 风格描述 +（可选）歌词 → 带人声的完整歌曲；不填歌词时由模型自动写词 |
 | 纯器乐 | 只给风格描述，`instrumental=true`，无人声 |
-| 翻唱 / 干声配乐 | 提供参考歌或清唱干声再编曲（接口已具备，界面暂未开放） |
+| 翻唱 / 干声配乐 | 提供参考歌或清唱干声再编曲（模型侧能力；本应用暂未实现，界面未开放） |
 
 ### 工作流程（重要：异步，不阻塞对话）
 
@@ -33,9 +33,9 @@
 | 配置 | 默认值 | 说明 |
 | :--- | :--- | :--- |
 | `musicEnabled` | `true` | 面板「设置 → AI 唱歌」开关；关闭后模型会提示用户去开启 |
-| `musicModel` | `stepaudio-3-music-preview` | 音乐模型 ID。**preview 版有下线风险**，模型不可用时可改这里 |
-| `musicBaseUrl` | `https://api.stepfun.com` | 音乐接口地址 |
-| `musicApiKey` | 空 | 音乐专用 Key；为空则沿用主 `apiKey`。**下发给渲染层时会脱敏** |
+| `musicModel` | `stepaudio-3-music-preview` | 面板「设置 → 音乐模型 ID」。**preview 版有下线风险**，模型不可用（404）时在此更换 |
+| `musicBaseUrl` | `https://api.stepfun.com` | 面板「设置 → 音乐接口地址」。只填根地址即可，程序自动拼接 `/v1/audio/music/submit`；结尾的 `/v1` 会被自动去掉，即使填成 `https://api.stepfun.com/v1` 也不会拼出重复版本段 |
+| `musicApiKey` | 空 | 面板「设置 → 音乐专属 API Key」；留空则沿用主 `apiKey`。保存后输入框清空，仅显示「是否已配置」（**下发给渲染层时会脱敏**） |
 
 生成音频保存位置：`%APPDATA%\jarvis-desktop-assistant\music\jarvis-song-<时间戳>.mp3`
 
@@ -86,7 +86,7 @@
 
 | 文件 | 改动 |
 | :--- | :--- |
-| `src/main/music.ts`（新增） | 音乐生成：提交 / 轮询 / 落盘 / 单飞 / 错误中文化 |
+| `src/main/music.ts`（新增） | 音乐生成：提交 / 轮询 / 落盘 / 单飞 / 错误中文化；接口地址归一化（去掉结尾 `/v1`，避免拼出 `/v1/v1`） |
 | `src/main/orb-size.ts`（新增） | 球体尺寸管理：手动基准 + 自适应倍率 + 分步动画 + 持久化 |
 | `src/main/orchestrator.ts` | 内置工具 `sing_song`（异步生成 + 播放 + 进度播报） |
 | `src/main/index.ts` | 球体窗口按配置尺寸创建；启动时挂载尺寸管理器并订阅状态机 |
@@ -95,5 +95,5 @@
 | `src/main/store.ts` | `getValidatedBounds(sizeOverride?)` 支持配置尺寸覆盖 |
 | `src/common/types.ts` | 配置字段与 `MUSIC_PLAY` / `ORB_SET_SIZE` / `ORB_SIZE_CHANGED` 通道 |
 | `src/preload/index.ts` | `onMusicPlay` / `orbSetSize` / `onOrbSizeChanged` 桥接 |
-| `src/renderer/panel.html` | 音乐开关、尺寸滑块与自适应开关、音乐播放（WebAudio，频谱驱动球体） |
+| `src/renderer/panel.html` | 音乐开关、音乐接口地址 / 模型 ID / 专属 Key 配置项、尺寸滑块与自适应开关、音乐播放（WebAudio，频谱驱动球体） |
 | `src/renderer/orb.html` | 命中半径按窗口尺寸推导 |

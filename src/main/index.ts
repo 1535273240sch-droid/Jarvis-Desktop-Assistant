@@ -17,7 +17,7 @@ import { wmcpInstaller } from "./wmcp-installer";
 import { visionManager } from "./vision";
 import { desktopController } from "./desktop-control";
 import { armEmergencyStop, disposeEmergencyStop, trigger as triggerEmergencyStop } from "./emergency-stop";
-import { isAuthorized, migrateLegacyAuthorization, getAuthzState } from "./authorization";
+import { isAuthorized, migrateLegacyAuthorization, ensureDefaultAuthorizations, getAuthzState } from "./authorization";
 import { taskRunner } from "./task-runner";
 import { registerIpcHandlers } from "./ipc";
 import { autoUpdater } from "electron-updater";
@@ -556,18 +556,22 @@ app.whenReady().then(async () => {
   // 3) 让安全模块知道去哪个窗口弹确认框
   safetyManager.setPanelResolver(() => panelWindow);
 
-  // 3b) 能力授权（项目书 P0 修复）：
-  //     - 不再「启动即自动全量授权」；已存在的授权记录视为用户显式选择，迁移保留；
-  //     - 撤回记录持久化，重启/截图/点击不会自动恢复；
-  //     - 未授权时首次使用会在面板提示（设置 → 能力授权）。
+  // 3b) 能力授权（项目书 P0 修复 + 桌面能力默认开启）：
+  //     - 顺序：先 migrateLegacyAuthorization() 把旧版记录迁移到当前 CONSENT_VERSION
+  //       （保留用户既有显式选择），再 ensureDefaultAuthorizations() 落地默认授权；
+  //       这样迁移不会覆盖默认授予，默认授予也会尊重迁移结果与持久化撤回记录。
+  //     - 桌面三类能力（屏幕录制/鼠标/键盘）默认开启，解决「全新安装下看屏幕不可用」；
+  //     - 撤回记录持久化：用户显式撤回的能力会被默认授权跳过，重启不会自动恢复；
+  //     - 对外发送（external-send）永不默认授予（安全红线：逐次独立确认，全自动也不豁免）。
   migrateLegacyAuthorization();
+  ensureDefaultAuthorizations();
   const authz = getAuthzState();
   if (authz.state === "granted" || authz.state === "partial") {
-    logger.info(`[Authorization] 当前授权：${authz.scope.join(", ")}`);
+    logger.info(`[Authorization] 桌面能力已默认开启（屏幕录制/鼠标/键盘）；当前授权：${authz.scope.join(", ")}`);
   } else if (authz.state === "revoked") {
-    logger.warn(`[Authorization] 存在持久化撤回记录（${authz.scope.join(", ")}），相关能力保持停用，直到用户在面板重新授权`);
+    logger.warn(`[Authorization] 桌面能力已默认开启；已撤回的能力保持停用：${authz.scope.join(", ")}（重启不会自动恢复，需在面板重新授权）`);
   } else {
-    logger.info("[Authorization] 尚未授权；首次使用桌面能力时请在面板「设置 → 能力授权」中开启");
+    logger.info("[Authorization] 尚未授权桌面能力；首次使用桌面能力时请在面板「设置 → 能力授权」中开启");
   }
 
   // 3c) 审计日志留存：按配置保留最近 N 天（项目书 P0 日志留存规则）

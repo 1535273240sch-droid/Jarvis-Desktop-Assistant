@@ -647,7 +647,34 @@
             </select>
             <button id="btnSaveMusic">应用</button>
           </div>
-          <div class="hint">生成一首完整歌曲约需 1~3 分钟，需要有效的 StepFun API Key（可在下方单独配置音乐 Key）。生成完成后会自动在 Jarvis 中播放，音频同时保存到本机 music 目录。</div>
+          <div class="hint">生成一首完整歌曲约需 1~3 分钟，需要有效的 StepFun API Key。生成完成后会自动在 Jarvis 中播放，音频同时保存到本机 music 目录。接口地址、模型 ID 与专属 Key 见下方三项。</div>
+        </div>
+
+        <div class="field">
+          <label>音乐接口地址（支持自定义端点）</label>
+          <div class="row">
+            <input id="musicBaseUrl" placeholder="https://api.stepfun.com" />
+            <button id="btnSaveMusicUrl">应用</button>
+          </div>
+          <div class="hint">只填根地址即可，程序会自动拼接 <code>/v1/audio/music/submit</code>；结尾若带 <code>/v1</code> 会被自动去掉，不会出现重复版本段。</div>
+        </div>
+
+        <div class="field">
+          <label>音乐模型 ID（支持自定义模型）</label>
+          <div class="row">
+            <input id="musicModel" placeholder="stepaudio-3-music-preview" />
+            <button id="btnSaveMusicModel">应用</button>
+          </div>
+          <div class="hint">默认 <code>stepaudio-3-music-preview</code> 为 preview 版，存在下线风险；模型不可用（404）时在此更换。</div>
+        </div>
+
+        <div class="field">
+          <label>音乐专属 API Key（可选）</label>
+          <div class="row">
+            <input id="musicApiKey" type="password" placeholder="留空则默认沿用上方主 API Key" autocomplete="off" />
+            <button id="btnSaveMusicKey">保存</button>
+          </div>
+          <div class="hint" id="musicKeyHint">未单独配置，默认沿用主 API Key</div>
         </div>
 
         <div class="field">
@@ -1400,6 +1427,14 @@ async function loadConfig() {
     $('execMode').value = c.confirmHighRisk ? 'confirm' : 'auto';
     // AI 唱歌开关回显（默认开启）
     if ($('musicEnabled')) $('musicEnabled').value = c.musicEnabled === false ? 'off' : 'on';
+    // 音乐接口地址与模型 ID 回填；专属 Key 不下发真实值，仅显示是否已配置
+    if ($('musicBaseUrl')) $('musicBaseUrl').value = c.musicBaseUrl || '';
+    if ($('musicModel')) $('musicModel').value = c.musicModel || '';
+    if ($('musicKeyHint')) {
+      $('musicKeyHint').textContent = c.musicApiKeyPresent
+        ? ('已单独配置：' + c.musicApiKey)
+        : '未单独配置，默认沿用主 API Key';
+    }
     // 悬浮球主题回显
     if ($('orbTheme')) $('orbTheme').value = c.orbTheme || 'siri';
     // 悬浮球尺寸与自适应回显
@@ -1585,6 +1620,26 @@ $('btnSaveMusic').onclick = async () => {
   const on = $('musicEnabled').value === 'on';
   await api.setConfig({ musicEnabled: on });
   toast(on ? 'AI 唱歌已开启' : 'AI 唱歌已关闭');
+  loadConfig();
+};
+
+$('btnSaveMusicUrl').onclick = async () => {
+  await api.setConfig({ musicBaseUrl: $('musicBaseUrl').value.trim() });
+  toast('音乐接口地址已更新');
+  loadConfig();
+};
+
+$('btnSaveMusicModel').onclick = async () => {
+  await api.setConfig({ musicModel: $('musicModel').value.trim() });
+  toast('音乐模型已更新');
+  loadConfig();
+};
+
+$('btnSaveMusicKey').onclick = async () => {
+  const v = $('musicApiKey').value.trim();
+  await api.setConfig({ musicApiKey: v });
+  $('musicApiKey').value = '';
+  toast(v ? '音乐专属 Key 已保存' : '已清除独立音乐 Key，沿用主 Key');
   loadConfig();
 };
 
@@ -2082,7 +2137,7 @@ async function loadAuthz() {
       const wasRevoked = revoked.includes(c);
       return '<div style="margin:2px 0">• ' + esc(CAP_LABEL[c]) + '：<b style="color:' + (on ? '#3ecf8e' : '#8a93a6') + '">' +
         (on ? '已授权' : wasRevoked ? '已撤回（持久生效）' : '未授权') + '</b></div>';
-    }).join('') + (st.state === 'none' ? '<div class="hint">首次使用：点击下方按钮完成授权后，桌面能力才会生效。</div>' : '');
+    }).join('') + (st.state === 'none' ? '<div class="hint">桌面能力默认开启；如需关闭，请在下方撤回（撤回后重启不会自动恢复）。</div>' : '');
   } catch (e) {
     $('authzBox').textContent = '授权状态读取失败。';
   }

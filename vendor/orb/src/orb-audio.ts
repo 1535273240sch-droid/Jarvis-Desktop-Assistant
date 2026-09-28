@@ -21,8 +21,16 @@ export const audioFlowStrengths: Record<number, number> = Object.fromEntries(
   Object.entries(audioStyleStrengths).map(([style, strength]) => [styleFlowIndexes[style as StyleName], strength]),
 );
 
+// 默认主题（siri）的音频强度，取值为 0.8（与 audioStyleStrengths.siri 一致）。
+// 未在 audioStyleStrengths 中登记的风格（frost / opal / blueDrop / refractiveBlob /
+// particleRibbon，以及 chrome / chromaticMetal 等）此前会因 `?? 0` 把 strength 判为 0
+// 并整段 return、完全不响应声音，导致除默认主题外的自定义主题「说话时没有动态」。
+// 回退到本常量后，所有主题的音频律动与默认主题 siri 保持一致；同时表中显式登记为 0
+// 的风格仍会被下面的 `if (!strength)` 关闭，语义不变。
+export const defaultAudioStrength = 0.8;
+
 export function applyAudioUniforms(values: Float32Array, bands: AudioBands): void {
-  const strength = audioFlowStrengths[Math.round(values[15])] ?? 0;
+  const strength = audioFlowStrengths[Math.round(values[15])] ?? defaultAudioStrength;
   if (!strength) return;
   for (const [index, band, additive, proportional, ceiling] of audioRules) {
     const input = bands[band];

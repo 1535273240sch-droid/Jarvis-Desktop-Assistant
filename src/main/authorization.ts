@@ -190,3 +190,56 @@ export function migrateLegacyAuthorization(): void {
 export function grantDiagnosticScope(): void {
   grantAuthorization(["screen-capture", "mouse-control", "keyboard-control"]);
 }
+
+/** 桌面操作类默认能力：屏幕录制 / 鼠标 / 键盘。与对外发送（external-send）严格分列 */
+export const DEFAULT_DESKTOP_CAPABILITIES: Capability[] = [
+  "screen-capture",
+  "mouse-control",
+  "keyboard-control",
+];
+
+/**
+ * 启动时确保三类桌面能力默认开启（屏幕录制 / 鼠标 / 键盘）。
+ *
+ * 背景：旧版"启动即全量授权"与"撤回后不得自动恢复"冲突，曾被整体移除；但全新安装下
+ * 屏幕录制默认关闭会导致「看屏幕」不可用。这里取折中：**桌面三类能力默认开启**，
+ * 同时用撤回记录把用户显式撤回的能力排除在外。
+ *
+ * 语义（三条硬约束）：
+ *  1. 默认授予：全新安装 / 从未授权时，把 ["screen-capture","mouse-control","keyboard-control"]
+ *     通过 grantAuthorization() 落盘，保证 getAuthzState() 显示为已授权（「看屏幕」默认可
+ *     直接使用）。授予动作复用 grantAuthorization 内部已有的 safetyManager.audit("authorize")，
+ *     不额外重复审计。
+ *  2. 跳过已撤回：先读 authorization-revoked.json，凡出现在 revoked 列表里的能力一律不授予，
+ *     保证「用户主动撤回后重启不会自动恢复」这条既有承诺仍然成立。
+ *  3. 绝不授予 external-send：对外发送/账号支付类动作必须逐次独立确认、全自动模式也不豁免，
+ *     这是项目安全红线；且它与「识别屏幕」无关，因此不纳入默认授权。
+ *
+ * 幂等：已授权能力重复授予只会合并 scope，无副作用。
+ * 安全：任何异常只写中文 warn 日志，绝不让应用启动失败。
+ */
+export function ensureDefaultAuthorizations(): void {
+  try {
+    const revoked = getRevocation()?.revoked ?? [];
+    const granted = getAuthorization()?.scope ?? [];
+    const toGrant = DEFAULT_DESKTOP_CAPABILITIES.filter(
+      (cap) => !revoked.includes(cap) && !granted.includes(cap),
+    );
+    const skipped = DEFAULT_DESKTOP_CAPABILITIES.filter((cap) => revoked.includes(cap));
+    if (skipped.length > 0) {
+      logger.warn(
+        `[Authorization] 以下桌面能力因用户曾显式撤回而跳过默认授予：${skipped.join(", ")}（不自动恢复用户已撤回的授权）`,
+      );
+    }
+    if (toGrant.length === 0) {
+      logger.info("[Authorization] 桌面能力均已默认开启或已授权，无需变更");
+      return;
+    }
+    // 只授予未撤回的项；grantAuthorization 会把本次授予项从撤回记录中移除，
+    // 由于 toGrant 已排除撤回项，因此不会误恢复任何被撤回的能力。
+    grantAuthorization(toGrant);
+    logger.info(`[Authorization] 桌面能力已默认开启（屏幕录制/鼠标/键盘），本次授予：${toGrant.join(", ")}`);
+  } catch (e) {
+    logger.warn("[Authorization] 默认授权初始化失败（不影响应用启动）:", e);
+  }
+}

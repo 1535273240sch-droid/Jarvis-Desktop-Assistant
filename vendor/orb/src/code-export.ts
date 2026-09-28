@@ -89,8 +89,12 @@ export function createWebExport(
     let motionPhase = 0;
     const audioRules = ${JSON.stringify(audioRules)};
     const audioFlowStrengths = ${JSON.stringify(audioFlowStrengths)};
+    // 默认回退强度：未在 audioFlowStrengths 中登记的风格回退到默认主题 siri 的强度，
+    // 避免 `?? 0` 让自定义主题完全不响应声音。这里用表内查值（siri 的流场索引）而非
+    // 字面量，构建期把音强表替换为放大值后，回退值会同步放大，与默认主题保持一致。
+    const defaultAudioStrength = audioFlowStrengths[${styleFlowIndexes.siri}];
     function applyAudioUniforms(values, bands) {
-      const strength = audioFlowStrengths[Math.round(values[15])] ?? 0;
+      const strength = audioFlowStrengths[Math.round(values[15])] ?? defaultAudioStrength;
       if (!strength) return;
       for (const [index, band, additive, proportional, ceiling] of audioRules) {
         const input = bands[band];
@@ -515,7 +519,9 @@ public struct LiquidOrbAudio: Sendable {
 
 private func applyOrbAudio(_ values: inout [Float], _ bands: LiquidOrbAudio) {
     let strengths: [Int: Float] = [${Object.entries(audioFlowStrengths).map(([key, value]) => `${key}: ${value}`).join(", ")}]
-    guard let strength = strengths[Int(values[15].rounded())] else { return }
+    // 未登记的风格回退到默认主题 siri 的强度，避免自定义主题完全不响应声音。
+    let strength = strengths[Int(values[15].rounded())] ?? strengths[${styleFlowIndexes.siri}] ?? 0
+    if strength == 0 { return }
     func level(_ value: Float) -> Float { value.isFinite ? max(0, min(1, value)) * strength : 0 }
 ${audioRules.map(([index, band, additive, proportional, ceiling]) => `    if level(bands.${band}) > 0 { values[${index}] = min(max(${ceiling}, values[${index}]), values[${index}] * (1 + ${proportional} * level(bands.${band})) + ${additive} * level(bands.${band})) }`).join("\n")}
 }

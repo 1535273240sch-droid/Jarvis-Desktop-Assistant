@@ -69,6 +69,31 @@ class MusicApiError extends Error {
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
+/**
+ * 归一化音乐接口「根地址」：去掉尾部斜杠，并去掉结尾的 `/v1` 版本段。
+ *
+ * 为什么需要：请求路径由代码固定拼接为 `<root>/v1/audio/music/submit`。
+ * 本应用其它地址（realtimeBaseUrl / visionBaseUrl）都习惯自带版本段，
+ * 用户很可能把 musicBaseUrl 照填成 `https://api.stepfun.com/v1`，
+ * 若不去重就会拼出 `.../v1/v1/audio/music/submit` → 404。
+ * 这里统一收敛到根地址，保证最终路径恰好是 `<root>/v1/audio/music/submit`。
+ *
+ * 边界规则：只剥离**字符串末尾**的一个 `/v1`（大小写不敏感，可带尾斜杠），
+ * 因此不会误伤 `https://host/openai/v1` —— 去掉尾部 v1 得 `https://host/openai`，
+ * 拼出 `https://host/openai/v1/audio/music/submit`，正是预期；
+ * 中间出现的 v1（如 `https://host/v1/openai`）一律不动。
+ */
+function normalizeMusicBaseUrl(raw: unknown): string {
+  // 先 trim + 去尾斜杠，再只剥离结尾的版本段
+  const base = String(raw || DEFAULT_BASE_URL)
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/v1$/i, "")
+    .replace(/\/+$/, "");
+  // 归一化后为空（例如用户只填了 "v1"）时回落到默认根地址
+  return base || DEFAULT_BASE_URL;
+}
+
 class MusicStudio {
   /** 单飞：同一时刻只允许一个生成任务，避免重复扣费与资源争抢 */
   private running = false;
@@ -97,7 +122,7 @@ class MusicStudio {
           "尚未配置音乐生成所需的 API Key。请在「设置」中填写 StepFun API Key（或单独的音乐 API Key）后重试。",
       };
     }
-    const baseUrl = String(cfg.musicBaseUrl || DEFAULT_BASE_URL).trim().replace(/\/+$/, "");
+    const baseUrl = normalizeMusicBaseUrl(cfg.musicBaseUrl);
     const model = String(cfg.musicModel || DEFAULT_MODEL).trim();
 
     const instrumental = opts.instrumental === true;
