@@ -1,5 +1,6 @@
 import { BrowserWindow } from "electron";
 import { logger } from "./logger";
+import { gpuProbe } from "./gpu-probe";
 import { ASSISTANT_STATES } from "../common/types";
 import type { AssistantState, AudioBands } from "../common/types";
 
@@ -112,29 +113,22 @@ class OrbController {
     }
   }
 
-  /** WebGPU 运行时自检，返回可读结果 */
+  /**
+   * WebGPU 运行时自检，返回可读结果。
+   *
+   * 委托给独立的一次性探针进程（gpuProbe，见 gpu-probe.ts）。
+   * **不能**在球体自己的 realm 里做：球体渲染器正用同一个 GPUAdapter 维持
+   * 一个长期活跃的 GPUDevice，若在这里 evalJs 探测，会在同一 adapter 上再
+   * requestDevice() 出第二个 device 并立即 destroy()——这正是
+   * docs/TODO-ORB-WEBGPU.md 与 docs/ORB-WEBGPU-RECOVERY.md 里 P1 明确要求
+   * 排除的自检副作用；日志中 Dawn 的
+   * `WebGPU device lost: A valid external Instance reference no longer exists`
+   * 这类 instance 生命周期错误与这种共用方式有关。
+   *
+   * 方法签名与返回结构保持不变，调用方无需改动。
+   */
   async checkWebGPU(): Promise<{ supported: boolean; adapterInfo?: Record<string, string>; error?: string }> {
-    try {
-      const r: any = await this.evalJs(`
-        (async () => {
-          if (!navigator.gpu) return { supported: false, error: "当前环境未检测到 navigator.gpu 接口" };
-          try {
-            const adapter = await navigator.gpu.requestAdapter();
-            if (!adapter) return { supported: false, error: "未找到兼容的 WebGPU 适配器" };
-            const info = adapter.info || {};
-            const device = await adapter.requestDevice();
-            if (!device) return { supported: false, error: "创建 WebGPU 设备失败" };
-            device.destroy();
-            return { supported: true, adapterInfo: {
-              vendor: info.vendor || "未知", architecture: info.architecture || "未知",
-              device: info.device || "未知", description: info.description || "" } };
-          } catch (e) { return { supported: false, error: e && e.message ? e.message : String(e) }; }
-        })()
-      `);
-      return r;
-    } catch (e) {
-      return { supported: false, error: (e as Error).message };
-    }
+    return gpuProbe.check();
   }
 
   /**

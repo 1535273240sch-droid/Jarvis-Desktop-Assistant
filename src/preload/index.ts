@@ -124,6 +124,9 @@ const panelApi = {
   // 其他
   togglePanel: () => invoke("window:toggle-panel"),
   gpuCheck: () => invoke("gpu:check"),
+  // 悬浮球恢复：查询当前进度 / 手动触发一次立即恢复
+  orbRecoveryStatus: () => invoke("orb:recovery-status"),
+  orbRetryRecovery: () => invoke("orb:retry-recovery"),
   quit: () => send("window:quit", {}),
 };
 

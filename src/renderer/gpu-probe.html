@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<!--
+  WebGPU 自检探针页（src/main/gpu-probe.ts 专用）。
+
+  用途：作为一个独立的、一次性的隐藏渲染进程，让主进程通过
+  webContents.executeJavaScript() 在其中执行 navigator.gpu.requestAdapter()
+  / adapter.requestDevice() / device.destroy() 的探测，从而彻底避免在球体
+  自己的渲染进程里对活跃的 GPUAdapter 再开第二个 device（待办文档 P1 要求
+  排除的干扰源）。
+
+  本页面不加载任何脚本、不主动上报任何内容；探测表达式由主进程注入。
+  每次自检会新建一个加载本页的 BrowserWindow，拿到结果后立即销毁、永不复用。
+-->
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <title>WebGPU 自检探针</title>
+  </head>
+  <body>
+    <!-- 极简静态页：仅作为 executeJavaScript 的执行宿主，无任何 UI -->
+  </body>
+</html>

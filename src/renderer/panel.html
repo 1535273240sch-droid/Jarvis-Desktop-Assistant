@@ -701,9 +701,11 @@
 
         <div class="kv"><span>工具执行状态</span><span id="mcpStatus">读取中...</span></div>
         <div class="kv"><span>WebGPU 状态</span><span id="gpuStatus">未检测</span></div>
+        <div class="kv"><span>球体恢复状态</span><span id="orbRecoveryStatus">读取中...</span></div>
         <div class="kv"><span>配置文件位置</span><span id="cfgPath">读取中...</span></div>
         <div class="row">
           <button id="btnGpu">重跑 WebGPU 自检</button>
+          <button id="btnOrbRecover">重试恢复球体</button>
         </div>
 
         <div class="field">
@@ -1601,6 +1603,36 @@ $('btnGpu').onclick = async () => {
   toast(r.supported ? 'WebGPU 可用' : 'WebGPU 不可用，球体无法渲染');
 };
 
+/* ---------------- 悬浮球恢复 ---------------- */
+
+// 只读主进程恢复状态，无副作用，可被 6s 轮询安全调用。
+async function loadOrbRecovery() {
+  try {
+    const s = (await api.orbRecoveryStatus()) || {};
+    let text;
+    if (s.exhausted) {
+      text = '已达上限（' + s.max + ' 次），需要手动重试';
+    } else if (s.attempts > 0) {
+      text = '重试中（第 ' + s.attempts + '/' + s.max + ' 次）' + (s.pending ? '，等待重载' : '');
+    } else {
+      text = '正常';
+    }
+    $('orbRecoveryStatus').textContent = text;
+  } catch (e) {
+    $('orbRecoveryStatus').textContent = '读取失败';
+  }
+}
+
+$('btnOrbRecover').onclick = async () => {
+  try {
+    const r = await api.orbRetryRecovery();
+    toast(r && r.ok ? '已触发球体恢复重试' : '恢复重试失败');
+  } catch (e) {
+    toast('恢复重试失败：' + (e && e.message ? e.message : e));
+  }
+  loadOrbRecovery();
+};
+
 /* ---------------- 人设 ---------------- */
 
 $('instructions').addEventListener('input', () => { $('instructions').dataset.dirty = '1'; });
@@ -1857,6 +1889,8 @@ async function loadDiag() {
   } catch (e) {
     $('diagSummary').textContent = '读取诊断信息失败：' + (e && e.message ? e.message : e);
   }
+  // 复用本函数的 6s 轮询同步刷新球体恢复状态（loadOrbRecovery 自带 try/catch 且无副作用）。
+  loadOrbRecovery();
 }
 
 $('btnRefreshDiag').onclick = () => { loadDiag(); toast('已刷新'); };

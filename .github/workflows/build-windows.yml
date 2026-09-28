@@ -97,6 +97,13 @@ jobs:
       - name: Verify desktop task suite
         run: node scripts/run.mjs verify-tasks
 
+      # 悬浮球恢复链路回归（纯逻辑/一致性，无需 GPU）：验证「设备丢失 → 重建」
+      # 路径不再终态停摆（退避序列 + 宿主兜底参数），并强制 模块源 orb-renderer.ts、
+      # 模板源 code-export.ts、构建产物 orb.html 三层的恢复标记一致 —— 拦的是
+      # 「只改产物被下次构建覆盖」的历史坑，以及生成器/产物的音频放大值漂移。
+      - name: Verify orb recovery path
+        run: node scripts/run.mjs verify-orb
+
       - name: Package Windows installer (NSIS) + update metadata
         run: npm run dist -- --publish never
 

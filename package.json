@@ -11,6 +11,7 @@
     "build": "node scripts/build.mjs",
     "start": "npm run build && electron .",
     "selftest": "npm run build && electron . --selftest",
+    "verify:orb": "node scripts/run.mjs verify-orb",
     "dist": "npm run build && electron-builder --win nsis",
     "pack": "npm run build && electron-builder --win nsis --dir"
   },

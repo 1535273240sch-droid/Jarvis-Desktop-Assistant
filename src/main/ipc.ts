@@ -46,40 +46,86 @@ export function registerIpcHandlers(deps: Deps): void {
   // 覆盖约 60s，既能等到 GPU 进程回来，又能避免无限重载。
   let orbRecoverAttempts = 0;
   let orbRecoverTimer: NodeJS.Timeout | null = null;
+  // 自动恢复达到上限后置位：面板据此显示「需要手动重试」，并在恢复就绪时复位。
+  let orbRecoveryExhausted = false;
   const ORB_RECOVER_MAX = 6;
   const ORB_RECOVER_DELAY_MS = 10000;
+
+  // 立即重载球体页面。定时器路径与面板手动重试路径共用，避免两份重载逻辑走样。
+  async function performOrbReload(reason: string): Promise<void> {
+    const win = deps.getOrbWindow();
+    if (!win || win.isDestroyed()) {
+      logger.warn("[IPC] 球体恢复失败：窗口不可用");
+      return;
+    }
+    orbController.attachTarget(win);
+    const theme = configManager.get().orbTheme || "siri";
+    const ok = await orbController.reloadWithTheme(theme);
+    logger.info(`[IPC] 球体恢复重载${ok ? "成功" : "失败"}：${reason}`);
+  }
+
+  // 供面板查询的最新恢复状态（无副作用，可被轮询）。
+  function orbRecoveryState() {
+    return {
+      attempts: orbRecoverAttempts,
+      max: ORB_RECOVER_MAX,
+      delayMs: ORB_RECOVER_DELAY_MS,
+      pending: orbRecoverTimer !== null,
+      exhausted: orbRecoveryExhausted,
+    };
+  }
 
   function scheduleOrbRecovery(reason: string): void {
     if (orbRecoverTimer) return;
     if (orbRecoverAttempts >= ORB_RECOVER_MAX) {
-      logger.warn(`[IPC] 球体恢复已达上限（${ORB_RECOVER_MAX} 次），停止自动重载：${reason}`);
+      // 只在上限被首次触及时置位并提示一次，避免重复报错刷屏。
+      if (!orbRecoveryExhausted) {
+        orbRecoveryExhausted = true;
+        logger.warn(`[IPC] 球体恢复已达上限（${ORB_RECOVER_MAX} 次），停止自动重载：${reason}`);
+        const p = deps.getPanelWindow();
+        if (p && !p.isDestroyed()) {
+          p.webContents.send(IPC.CHAT_MESSAGE, {
+            systemNotice: `⚠️ 悬浮球自动恢复已达上限（${ORB_RECOVER_MAX} 次），球体可能仍是黑屏。请点击「设置与状态 → 重试恢复球体」，或重启应用。`,
+          });
+        }
+      }
       return;
     }
     orbRecoverAttempts += 1;
     logger.warn(`[IPC] 将在 ${ORB_RECOVER_DELAY_MS}ms 后重载球体页面（第 ${orbRecoverAttempts} 次）：${reason}`);
     orbRecoverTimer = setTimeout(async () => {
       orbRecoverTimer = null;
-      const win = deps.getOrbWindow();
-      if (!win || win.isDestroyed()) {
-        logger.warn("[IPC] 球体恢复失败：窗口不可用");
-        return;
-      }
-      orbController.attachTarget(win);
-      const theme = configManager.get().orbTheme || "siri";
-      const ok = await orbController.reloadWithTheme(theme);
-      logger.info(`[IPC] 球体恢复重载${ok ? "成功" : "失败"}`);
+      await performOrbReload(reason);
     }, ORB_RECOVER_DELAY_MS);
   }
 
   ipcMain.on(IPC.ORB_ON_READY, (_e, state: string) => {
     logger.info(`[IPC] 球体已就绪，初始状态：${state}`);
-    // 渲染恢复正常，清空恢复计数与待执行的恢复定时器。
+    // 渲染恢复正常，清空恢复计数、上限标记与待执行的恢复定时器。
     orbRecoverAttempts = 0;
+    orbRecoveryExhausted = false;
     if (orbRecoverTimer) {
       clearTimeout(orbRecoverTimer);
       orbRecoverTimer = null;
     }
     orbController.markReady();
+  });
+
+  // 面板查询球体恢复进度（只读，可被 6s 轮询）。
+  ipcMain.handle(IPC.ORB_RECOVERY_STATUS, async () => orbRecoveryState());
+
+  // 面板手动重试恢复：清空自动恢复状态并**立即**重载一次球体页面。
+  ipcMain.handle(IPC.ORB_RETRY_RECOVERY, async () => {
+    if (orbRecoverTimer) {
+      clearTimeout(orbRecoverTimer);
+      orbRecoverTimer = null;
+    }
+    orbRecoverAttempts = 0;
+    orbRecoveryExhausted = false;
+    safetyManager.audit("orb_recovery_retry", {});
+    logger.info("[IPC] 用户手动触发球体恢复重试，立即重载球体页面");
+    await performOrbReload("面板手动重试");
+    return { ok: true, status: orbRecoveryState() };
   });
 
   ipcMain.on(IPC.ORB_ON_ERROR, (_e, msg: string) => {

@@ -318,6 +318,9 @@ export const IPC = {
   // 悬浮球尺寸：渲染 → 主请求设置尺寸；主 → 渲染广播当前生效尺寸
   ORB_SET_SIZE: "orb:set-size",
   ORB_SIZE_CHANGED: "orb:size-changed",
+  // 悬浮球宿主侧兜底恢复：面板查询当前恢复进度；面板手动触发一次立即恢复
+  ORB_RECOVERY_STATUS: "orb:recovery-status",
+  ORB_RETRY_RECOVERY: "orb:retry-recovery",
 
   // —— 窗口交互 ——
   WINDOW_SET_IGNORE_MOUSE: "window:set-ignore-mouse",

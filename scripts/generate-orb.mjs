@@ -20,10 +20,11 @@ const server = await createServer({
 });
 
 try {
-  const [orbStates, orbUniforms, codeExport] = await Promise.all([
+  const [orbStates, orbUniforms, codeExport, audioTuning] = await Promise.all([
     server.ssrLoadModule("/src/orb-states.ts"),
     server.ssrLoadModule("/src/orb-uniforms.ts"),
     server.ssrLoadModule("/src/code-export.ts"),
+    server.ssrLoadModule("/src/orb-audio-tuning.ts"),
   ]);
 
   // 选择支持音频响应的 siri 预设
@@ -38,34 +39,38 @@ try {
   // 加法项(additive)与比例项(proportional)，并同步抬高 ceiling，
   // 让同样一段语音产生明显得多的表面撕裂、外轮廓涟漪与流场流动。
   //
+  // 放大值集中声明在 vendor/orb/src/orb-audio-tuning.ts（宿主侧构建期参数），
+  // 本脚本不再硬编码字面量：导出模板会把 audioRules / audioFlowStrengths
+  // 序列化成 `const audioRules = [...];` / `const audioFlowStrengths = {...};`
+  // 形式的文本，用正则整段定位并替换即可（结构化替换，不依赖上游具体数值），
+  // 因此上游改模板数值也不会让构建失败。
+  //
   // 各索引含义见 vendor/orb/src/orb-audio.ts 的 audioRules 注释：
   //   [uniformIndex, 频段, 加法量, 比例量, 上限]
   //   3  = 全局形变强度     6  = 中频表面撕裂    7  = 低频轮廓涟漪
   //   21 = 低频流场扭曲     10 = 高频细节抖动    14 = 全局流场强度
-  const ORIGINAL_RULES = 'const audioRules = [[3,"all",0,0.7,5],[6,"mid",0.85,0,7],[21,"low",0.075,0,1],[10,"high",0.16,0,2],[14,"all",0,0.12,4]];';
-  const AMPLIFIED_RULES =
-    'const audioRules = [[3,"all",0.35,2.6,14],[6,"mid",4.2,1.1,22],[7,"low",1.1,1.9,13],' +
-    '[21,"low",1.05,1.6,5.5],[10,"high",0.95,0.6,7],[14,"all",0.25,0.75,9]];';
-  if (!html.includes(ORIGINAL_RULES)) {
-    // 兼容「已被上一版本替换过」的情况（幂等：重复构建不会叠加放大）
-    const previous =
-      'const audioRules = [[3,"all",0,1.2,8],[6,"mid",2.2,0.4,12],[7,"low",0.4,0.8,6],[21,"low",0.38,0.6,1.8],[10,"high",0.35,0.2,3],[14,"all",0,0.25,5]];';
-    if (!html.includes(previous)) {
-      throw new Error(
-        "未能匹配音频规则（audioRules）——上游 orb 导出模板可能已变更，请核对 vendor/orb 的 orb-audio.ts"
-      );
-    }
-    html = html.replace(previous, AMPLIFIED_RULES);
-  } else {
-    html = html.replace(ORIGINAL_RULES, AMPLIFIED_RULES);
+  const audioRulesPattern = /const audioRules = \[\[[\s\S]*?\]\];/;
+  if (!audioRulesPattern.test(html)) {
+    throw new Error(
+      "未能在导出模板中定位 audioRules 数组字面量，请核对 vendor/orb 的 code-export/orb-audio 输出"
+    );
   }
+  // 幂等：无论产物是上游原值还是已放大值，正则都能匹配并写入放大值。
+  html = html.replace(
+    audioRulesPattern,
+    `const audioRules = ${JSON.stringify(audioTuning.amplifiedAudioRules)};`
+  );
 
-  const ORIGINAL_FLOW = 'const audioFlowStrengths = {"9":0.8,"10":0.65,"11":0.65,"14":0.75,"19":1,"21":0.7};';
-  const PREVIOUS_FLOW = 'const audioFlowStrengths = {"9":1.6,"10":1.2,"11":1.2,"14":1.4,"19":1.8,"21":1.3};';
-  const AMPLIFIED_FLOW = 'const audioFlowStrengths = {"9":2.6,"10":2.1,"11":2.1,"14":2.4,"19":2.9,"21":2.2};';
-  if (html.includes(ORIGINAL_FLOW)) html = html.replace(ORIGINAL_FLOW, AMPLIFIED_FLOW);
-  else if (html.includes(PREVIOUS_FLOW)) html = html.replace(PREVIOUS_FLOW, AMPLIFIED_FLOW);
-  else throw new Error("未能匹配音频流场强度（audioFlowStrengths）——请核对上游模板");
+  const audioFlowPattern = /const audioFlowStrengths = \{[^}]*\};/;
+  if (!audioFlowPattern.test(html)) {
+    throw new Error(
+      "未能在导出模板中定位 audioFlowStrengths 对象字面量，请核对 vendor/orb 的 code-export/orb-audio 输出"
+    );
+  }
+  html = html.replace(
+    audioFlowPattern,
+    `const audioFlowStrengths = ${JSON.stringify(audioTuning.amplifiedAudioFlowStrengths)};`
+  );
 
   // —— 多主题注入 ——
   //
