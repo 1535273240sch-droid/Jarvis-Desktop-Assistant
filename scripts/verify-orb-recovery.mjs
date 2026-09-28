@@ -271,6 +271,54 @@ try {
   check(false, "音频参数一致性检查", e.message);
 }
 
+// -------------------------------------------------- 6. 主题调色板贯穿全部状态
+console.log("\n=== 6. 主题颜色贯穿全部状态（不被固定语义色覆盖）===");
+try {
+  const html = readUtf8(F_ORB_HTML);
+  const tm = html.match(/const __ORB_THEMES = (\{[\s\S]*?\});\s*\n\s*const stateSeeds/);
+  check(Boolean(tm), "产物中存在 __ORB_THEMES 主题表");
+  if (tm) {
+    const themes = JSON.parse(tm[1]);
+    // 颜色在 uniform 快照中的偏移（与 scripts/generate-orb.mjs 的 PROFILE_COLOR_OFFSET 一致）
+    const COLOR_OFFSETS = [40, 44, 48, 52, 56, 84];
+    const STATES_NON_IDLE = ["listening", "executing", "speaking", "error"];
+    const rgb = (seed, off) => [0, 1, 2].map((k) => Number(seed[off + k]).toFixed(4)).join(",");
+    const hexOf = (seed, off) =>
+      "#" + [0, 1, 2].map((k) => Math.max(0, Math.min(255, Math.round(seed[off + k] * 255))).toString(16).padStart(2, "0")).join("").toUpperCase();
+
+    // vendor 里写死的固定语义色（出现即说明覆盖没生效）
+    const SEMANTIC = new Set(["#00E5FF", "#1DE9B6", "#00B0FF", "#64FFDA", "#38EF7D", "#11998E", "#00C9FF", "#92FE9D", "#FFB300", "#FF6F00", "#FF8F00", "#FFA000", "#FF1744", "#D50000"]);
+
+    const leaked = [];
+    const mismatched = [];
+    for (const name of Object.keys(themes)) {
+      const table = themes[name];
+      if (!table || !table.thinking) { mismatched.push(`${name}: 缺少 thinking`); continue; }
+      for (const st of STATES_NON_IDLE) {
+        const seed = table[st];
+        if (!seed) { mismatched.push(`${name}/${st}: 缺少状态种子`); continue; }
+        for (const off of COLOR_OFFSETS) {
+          if (rgb(seed, off) !== rgb(table.thinking, off)) mismatched.push(`${name}/${st}@${off}`);
+        }
+        if (SEMANTIC.has(hexOf(seed, 40))) leaked.push(`${name}/${st}=${hexOf(seed, 40)}`);
+      }
+    }
+    check(mismatched.length === 0,
+      "每套主题的 listening/executing/speaking/error 均使用自身调色板",
+      mismatched.length ? "偏离：" + mismatched.slice(0, 6).join(", ") : "6 套主题 × 4 状态");
+    check(leaked.length === 0,
+      "不再出现 vendor 的固定语义色（青/绿/琥珀/红）",
+      leaked.length ? leaked.join(", ") : "无");
+
+    // 主题之间必须真的不同（否则等于又退化成全局常量）
+    const speakingColors = Object.keys(themes).map((n) => hexOf(themes[n].speaking, 40));
+    check(new Set(speakingColors).size >= 4,
+      "各主题说话态颜色互不相同", speakingColors.join(" "));
+  }
+} catch (e) {
+  check(false, "主题颜色检查", e.message);
+}
+
 // ---------------------------------------------------------------- 汇总
 console.log(`\n=== 汇总：${pass} 通过，${fail} 失败 ===`);
 if (failures.length) {

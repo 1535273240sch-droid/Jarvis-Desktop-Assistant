@@ -110,10 +110,43 @@ try {
     for (const [key, idx] of Object.entries(PROFILE_NUMERIC_INDEX)) idleOverrides[key] = t.idle[idx];
     for (const [key, off] of Object.entries(PROFILE_COLOR_OFFSET)) idleOverrides[key] = floatsToHex(t.idle, off);
     cfg.profiles.idle = { ...cfg.profiles.idle, ...idleOverrides };
+
+    // 让主题的调色板贯穿「全部」状态。
+    //
+    // 背景：vendor 的 listening / executing / speaking / error 四个 profile 里**硬编码了
+    // 固定语义色**（speaking = #00E5FF 青、listening = 绿、executing = 琥珀、error = 红），
+    // 于是换上任何主题，一进入说话状态球体就变回青色，主题身份丢失
+    //（用户反馈：「主题是什么颜色，它现在是什么颜色」不一致）。
+    // 这里在构建期把这四个状态的颜色也覆盖成主题自己的调色板 —— **只覆盖颜色**，
+    // 各状态的运动特征（speed / warp / contourDeform / edgeGlow …）保持原样，
+    // 状态之间的区分改由「动感强弱 + 亮度」承载。vendored 运行时不改，
+    // 覆盖只发生在宿主构建期（与音频放大参数的注入方式一致）。
+    const themeColorPatch = {};
+    for (const [key, off] of Object.entries(PROFILE_COLOR_OFFSET)) {
+      themeColorPatch[key] = floatsToHex(t.thinking, off);
+    }
+    for (const n of orbStates.orbStateNames) {
+      if (n === "idle" || n === "thinking") continue;
+      cfg.profiles[n] = { ...cfg.profiles[n], ...themeColorPatch };
+    }
     themeTable[t.style] = Object.fromEntries(
       orbStates.orbStateNames.map((n) => [n, orbUniforms.createOrbUniformSnapshot(orbStates.resolveOrbStateParams(cfg, n))])
     );
     console.log(`[Generate Orb] theme injected: ${t.style} (${t.name})`);
+  }
+
+  // 默认主题（siri）同样处理：它在导出模板里自带 6 态种子，其中那 4 个状态同样是固定
+  // 语义色。若只改导入主题，就会出现「默认主题会随状态变色、其它主题反而不变」的新不一致。
+  // 这里用 siri 自己的 thinking 调色板覆盖那 4 个状态的颜色，规则与导入主题完全一致。
+  const siriStates = themeTable.siri;
+  if (siriStates && siriStates.thinking) {
+    for (const n of Object.keys(siriStates)) {
+      if (n === "idle" || n === "thinking") continue;
+      for (const off of Object.values(PROFILE_COLOR_OFFSET)) {
+        for (let k = 0; k < 4; k++) siriStates[n][off + k] = siriStates.thinking[off + k];
+      }
+    }
+    console.log("[Generate Orb] 默认主题 siri 的 4 个状态颜色也已对齐到自身调色板");
   }
 
   html = html.replace(
