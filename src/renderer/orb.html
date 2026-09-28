@@ -34,7 +34,7 @@
     let restartAttempts = 0;
     let starting = false;
     let exhausted = false;
-    // 设备丢失后只做少量快速重试（约 15s），仍失败则上报宿主重载页面兜底。
+    // 只做少量快速重试（覆盖瞬时抖动）；失败后上报宿主重载页面做彻底重建。
     const maxRestartAttempts = 5;
     const restartBaseDelayMs = 500;
     const restartMaxDelayMs = 8000;

@@ -11,6 +11,7 @@
  *   2. 退避序列正确   —— 由源码参数复算 5 次重试延迟 = [500..8000]，总 15.5s
  *   3. 三层一致性     —— 恢复逻辑标记必须同在模块源 / 模板源 / 构建产物三处
  *                        （历史高频坑：只改产物会被下次构建覆盖）
+ *   3b. 产物完整性    —— orb.html 必须是完整 HTML（防模板字符串提前结束导致静默截断）
  *   4. 宿主兜底参数   —— ORB_RECOVER_MAX=6、ORB_RECOVER_DELAY_MS=10000，
  *                        且 ORB_ON_ERROR 触发重建、ORB_ON_READY 清零计数
  *   5. 音频参数一致   —— 产物里的放大值 audioRules / audioFlowStrengths
@@ -145,6 +146,23 @@ try {
   }
 } catch (e) {
   check(false, "三层一致性检查", e.message);
+}
+
+// -------------------------------------------------- 3b. 构建产物完整性（防截断）
+console.log("\n=== 3b. 构建产物完整性（防模板字符串被提前截断）===");
+try {
+  const html = readUtf8(F_ORB_HTML);
+  // 踩过的坑：code-export.ts 把整页放在**一个反引号模板字符串**里。只要有人在
+  // 那段模板的注释里写下未转义的反引号，模板就会在那里提前结束，导出的 orb.html
+  // 被**静默截断**（页面缺 </script>/</body>/</html>，球体直接白屏），
+  // 而生成器与 tsc 都不会报任何错。所以这里把「产物必须是一份完整 HTML」固定下来。
+  check(html.trimEnd().endsWith("</html>"), "产物以 </html> 结尾（未被截断）");
+  const closeScript = html.split("</script>").length - 1;
+  check(closeScript >= 2, "产物含完整的 script 块", `</script> x${closeScript}`);
+  check(html.includes("electronBridge"), "产物含宿主桥接脚本（桥接段未被截断）");
+  check(html.includes("window.liquidOrb"), "产物暴露 window.liquidOrb 接口");
+} catch (e) {
+  check(false, "产物完整性检查", e.message);
 }
 
 // ---------------------------------------------------------------- 4. 宿主兜底参数

@@ -90,7 +90,7 @@ export function createWebExport(
     const audioRules = ${JSON.stringify(audioRules)};
     const audioFlowStrengths = ${JSON.stringify(audioFlowStrengths)};
     // 默认回退强度：未在 audioFlowStrengths 中登记的风格回退到默认主题 siri 的强度，
-    // 避免 `?? 0` 让自定义主题完全不响应声音。这里用表内查值（siri 的流场索引）而非
+    // 避免 \`?? 0\` 让自定义主题完全不响应声音。这里用表内查值（siri 的流场索引）而非
     // 字面量，构建期把音强表替换为放大值后，回退值会同步放大，与默认主题保持一致。
     const defaultAudioStrength = audioFlowStrengths[${styleFlowIndexes.siri}];
     function applyAudioUniforms(values, bands) {
