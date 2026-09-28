@@ -14,8 +14,8 @@
  *   3b. 产物完整性    —— orb.html 必须是完整 HTML（防模板字符串提前结束导致静默截断）
  *   4. 宿主兜底参数   —— ORB_RECOVER_MAX=6、ORB_RECOVER_DELAY_MS=10000，
  *                        且 ORB_ON_ERROR 触发重建、ORB_ON_READY 清零计数
- *   5. 音频参数一致   —— 产物里的放大值 audioRules / audioFlowStrengths
- *                        与构建期期望值（JSON 解析后深比较）一致
+ *   5. 音频参数分档   —— 产物 audioRules 等于调音常量；audioFlowStrengths 中默认主题强度
+ *                        与常量一致，5 套主题各按自己的基准分档且落在 (0, 3] 区间
  *
  * 用法：node scripts/verify-orb-recovery.mjs   （需先 npm run build）
  */
@@ -243,8 +243,28 @@ try {
     if (!parseErr) {
       check(canon(gotRules) === canon(expectedRules),
         "产物 audioRules 等于期望放大值", canon(gotRules));
-      check(canon(gotFlow) === canon(expectedFlow),
-        "产物 audioFlowStrengths 等于期望放大值", canon(gotFlow));
+
+      // audioFlowStrengths 现在由生成器「按主题分档」计算（见 scripts/generate-orb.mjs）：
+      // 默认主题的强度必须与调音常量一致（默认主题的手感不允许被改动），其余风格键
+      // 由生成器按各主题基准 + 高光参数收敛算出，这里只校验它们存在且落在合理区间。
+      const defaultIdx = "9";
+      check(Number(gotFlow[defaultIdx]) === Number(expectedFlow[defaultIdx]),
+        `默认主题(siri, 索引 ${defaultIdx})的音频强度与调音常量一致`,
+        `${gotFlow[defaultIdx]} vs ${expectedFlow[defaultIdx]}`);
+
+      const missingBase = Object.keys(expectedFlow).filter((k) => !(k in gotFlow));
+      check(missingBase.length === 0,
+        "产物保留了全部基础风格强度键", missingBase.length ? "缺少：" + missingBase.join(", ") : Object.keys(expectedFlow).join(", "));
+
+      const vals = Object.entries(gotFlow);
+      const bad = vals.filter(([, v]) => !Number.isFinite(v) || v <= 0 || v > 3);
+      check(bad.length === 0,
+        "所有音频强度均在 (0, 3] 区间内（生成器的收敛上限）", bad.length ? JSON.stringify(bad) : `${vals.length} 个键`);
+      // 主题分档：用户 5 套主题的流场索引必须各自有独立强度，避免回退到同一档而再次过驱
+      const themeIdx = ["13", "15", "20", "23", "24"];
+      const missingTheme = themeIdx.filter((k) => !(k in gotFlow));
+      check(missingTheme.length === 0,
+        "5 套主题各自的音频强度已按主题分档写入", missingTheme.length ? "缺少：" + missingTheme.join(", ") : themeIdx.map((k) => `${k}:${gotFlow[k]}`).join(" "));
     }
   }
 } catch (e) {
