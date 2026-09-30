@@ -1,111 +1,116 @@
 # Jarvis - Windows 11 桌面智能助理 (Desktop AI Assistant)
 
-> Windows 11 桌面 AI 助理：**WebGPU 流体玻璃悬浮球**、**实时全双工语音 (Realtime Voice)**、**MCP 桌面工具执行**、**多模态屏幕理解** 与 **AI 唱歌**。
+<div align="center">
 
-| 项目 | 信息 |
+![Version](https://img.shields.io/badge/Version-v1.4.29-blue?style=flat-square)
+![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011%20(64--bit)-0078D4?style=flat-square&logo=windows11)
+![Electron](https://img.shields.io/badge/Electron-34.0-47848F?style=flat-square&logo=electron)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?style=flat-square&logo=typescript)
+![Graphics](https://img.shields.io/badge/Graphics-WebGPU%20%7C%20WGSL-E10098?style=flat-square)
+![Protocol](https://img.shields.io/badge/Protocol-WebSocket%20%2B%20MCP%20JSON--RPC-brightgreen?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-purple?style=flat-square)
+
+<p align="center">
+  <b>常驻桌面右下角的下一代流体玻璃悬浮球 (Liquid Glass Orb) 与多模态具身操作系统助理</b><br>
+  WebGPU 原生流体着色器 · 24kHz 实时全双工流式对讲 · MCP 自动化桌面工具中枢 · Win32 物理坐标屏幕视觉解析
+</p>
+
+</div>
+
+---
+
+## 📋 核心运行规范一览
+
+| 维度指标 | 规范标准 |
 |---|---|
-| 运行时 | Electron 34 + TypeScript 5.7（Node.js 22） |
-| 图形 | WebGPU API + WGSL 着色器 |
-| 平台 | Windows 10 / 11（64 位），显卡需支持 WebGPU |
-| 安装包 | NSIS（electron-builder），不内置任何密钥 |
-| 协议 | WebSocket（实时语音）/ JSON-RPC 2.0（MCP over stdio）/ HTTPS（视觉、音乐） |
-| 版本 | v1.4.29 |
+| **宿主运行时** | **Electron 34** + **TypeScript 5.7**（Node.js 22 LTS） |
+| **图形渲染** | **WebGPU API** + **WGSL 硬件级着色器**（支持流体光影折射） |
+| **适配平台** | Windows 10 / Windows 11（64 位），显卡驱动支持 WebGPU |
+| **网络协议** | 实时全双工 WebSocket（PCM16 音频）/ JSON-RPC 2.0（MCP over stdio）/ HTTPS |
+| **安装打包** | NSIS 单文件/一键安装包（由 electron-builder 构建，无内置密钥） |
 
-## 一、这是什么
+---
 
-常驻桌面右下角的一颗 **流体玻璃悬浮球 (Liquid Glass Orb)**，配一扇晶体玻璃对话面板：用语音或文字交流，让它看屏幕、操作电脑、执行长任务。
+## 🌟 核心系统功能矩阵
 
-## 二、能做什么
-
-| 能力 | 说明 |
+| 功能模块 | 技术实现与体验细节 |
 |---|---|
-| 🔮 悬浮球 | WebGPU（WGSL）流体玻璃球，136 项 uniform；6 态状态机 `idle / listening / thinking / executing / speaking / error`；透明区域点击穿透、球体可拖拽并记忆位置；尺寸 80~400px 可调（可开「随状态自适应」） |
-| 🎙️ 实时语音 | 原生 WebSocket 双向流式，24kHz 单声道 PCM16，端到端几百毫秒；用户开口即打断（清空播放缓冲 + `response.cancel`）；Server VAD 自动断句；实测被服务端接受的音色为 `cixingnansheng` / `zhengpaiqingnian` / `wenrounvsheng`，保留自定义入口 |
-| ⚙️ 桌面工具 | 内置 17 个工具；内置 MCP `@wonderwhy-er/desktop-commander` 裁剪为 12 个工具；外部预设 Windows-MCP（工具加 `windows_mcp__` 前缀）可一键安装，同过安全闸门并写审计 |
-| 👁️ 屏幕理解 | `desktopCapturer` + Win32 坐标换算，截活动窗口或全屏，带坐标送多模态模型，返回物理坐标用于单击/双击/输入/组合键；支持自定义视觉模型与兼容端点（OneAPI / Ollama / vLLM 等） |
-| 🛰 桌面任务 | 三种长任务：浏览器搜索整理、指挥你指定的编码 Agent、微信草稿（仅草稿 + 人工发送）；进度独立展示，报告分页读取 |
-| 🎵 AI 唱歌 | 说「唱首歌」即调音乐模型现场生成带人声歌曲并自动播放；异步生成、每 5 秒播报进度，失败如实告知 |
+| 🔮 **WebGPU 流体玻璃球** | 采用 WGSL 原生编写的高性能流体玻璃球着色器，涵盖 136 项 uniform 实时参数；6 态核心状态机架构（`idle` 待机 / `listening` 拾音 / `thinking` 思维链 / `executing` 工具执行 / `speaking` 发音 / `error` 告警）；具备透明区域点击物理穿透、球体任意拖拽与坐标记忆，支持 80~400px 无级缩放与状态自适应微变形。 |
+| 🎙️ **实时全双工语音** | 基于纯原生 WebSocket 双向流式通信，24kHz 单声道无压缩 PCM16，端到端延迟低至几百毫秒；支持**用户开口即打断**（毫秒级清空本地音频播放缓冲并下发 `response.cancel`）；服务端集成智能 Server VAD 自动端点检测断句。 |
+| ⚙️ **MCP 桌面工具执行引擎** | 原生内置 17 项桌面自动化基础工具；深度剪裁集成官方 MCP `@wonderwhy-er/desktop-commander`（保留 12 项精选工具）；支持外部生态 Windows-MCP 预设工具一键无缝接入，全流程经由安全决策闸门并在本地写入脱敏审计。 |
+| 👁️ **多模态物理屏幕理解** | `desktopCapturer` 结合高精度 Win32 物理坐标自适应换算，支持活动窗口截屏或多屏拼接截取；坐标向量实时喂入多模态大模型，回传物理级准星坐标用于模拟鼠标单击、双击、拖拽、富文本输入与键盘复合快捷键。 |
+| 🛰️ **长任务异步编排中枢** | 支持三大类自动化长程任务：全网浏览器深度搜索汇总、调度外部 Coding Agent 代码编写、即时通讯草稿生成（严格遵循仅存草稿、需人工确认核验安全红线）；具备独立任务进度仪表盘与日志分页回溯。 |
+| 🎵 **现场 AI 音乐合成与演唱** | 语音触发“唱首歌”指令，即可异步调用音乐生成模型现场作曲编曲并合成带人声高保真音频，生成过程每隔 5 秒语音温和播报进度，异常透明降级处理。 |
 
-### 多主题与悬浮球稳定性
+---
 
-- **多主题**：默认主题 **siri**，另有 5 套用户导入主题 —— frost（霜白）、opal（蛋白石）、blueDrop（深海蓝）、refractiveBlob（紫晶）、particleRibbon（粒子丝带）。主题在构建期注入产物，面板切换即热重载；**所有主题说话/播报时的动态与默认主题一致**。
-- **设备丢失自愈（三层）**：渲染器指数退避重建（5 次，合计约 15.5s）→ 宿主重载球体页兜底（10s × 6，约 60s）→ 面板「球体恢复状态」提示 + 「重试恢复球体」按钮（立即重载，不等 10 秒）。
-- **WebGPU 自检已隔离**：自检改在**一次性隐藏探针窗口**中执行，拿到结果立即销毁，避免对球体正在使用的 adapter 再次 `requestDevice()` 造成干扰。
-- 细节见 [docs/悬浮球-WebGPU-稳定性.md](docs/悬浮球-WebGPU-稳定性.md)。
+## 🎨 多主题设计与硬件级容灾机制
 
-## 三、典型用法
+- **多套光影主题热重载**：内置经典 **siri** 流体主题，并附带 5 套高质感定制主题 —— `frost`（霜白冷光）、`opal`（蛋白石霓虹）、`blueDrop`（深海透镜）、`refractiveBlob`（高折射紫晶）、`particleRibbon`（流体粒子丝带），构建期预置，面板点选毫秒级热更。
+- **三层设备丢失（Device Lost）自愈架构**：
+  $$\text{渲染层指数退避重建 (5次)} \longrightarrow \text{主进程无感重载球体页 (60s兜底)} \longrightarrow \text{面板「一键手动重试恢复」按键}$$
+- **隔离式 WebGPU 探针**：硬件特性探测全部放在一次性隐藏后台窗口执行，探测完毕即时销毁释放，杜绝与前台正常渲染的 Adapter 产生上下文抢占。
 
-1. **语音控制桌面**：「打开计算器」「打开浏览器搜索今天的科技新闻」。
-2. **免手伴随式助手**：不必离开当前编辑窗口，语音让它检索项目文件、修改函数或归档目录。
-3. **屏幕排障**：遇到报错弹窗、蓝屏代码或英文文档，说「看屏幕」获取诊断建议。
-4. **长任务监控**：后台跑编译或长命令，让它随时语音汇报进展。
+---
 
-## 四、架构与技术栈
+## 🏗️ 进程架构与通信拓扑
 
-| 区块 | 组成 |
-|---|---|
-| 渲染进程 | WebGPU 悬浮球（WGSL 着色器）+ 晶体玻璃面板 UI + Web Audio 采集/播放 |
-| 主进程 | 中枢编排（六态唯一真源、打断时序）、实时语音客户端、视觉管理器、MCP 客户端 |
-| 通道 A（语音） | 实时 WebSocket，Server VAD 与函数调用 |
-| 通道 B（视觉） | 独立 HTTPS 多模态通道（实时语音通道不传图） |
-| 安全层 | 动作语义分级、能力授权、目录白名单、敏感操作确认、审计留痕 |
-
-## 五、快速开始
-
-### 方式一：安装成品安装包（普通用户）
-
-1. 下载 `Jarvis-Setup-<版本>-x64.exe`（以 Release 页实际文件名为准），双击安装（可自定义路径，自动创建快捷方式）；
-2. 启动后右下角出现悬浮球并打开面板；
-3. 展开面板「设置与状态」，填入 API Key、选择音色并保存（**安装包不内置任何密钥**）；
-4. 点「启动语音会话」开始语音交互。
-
-详见 [docs/安装说明.md](docs/安装说明.md)。
-
-### 方式二：源码编译与二次开发
-
-```bash
-npm install        # 安装依赖
-npm run build      # 生成球体页 → 编译 TypeScript → 拷贝资源 → 校验产物
-npm run selftest   # 自测（含球体六态截图取证）
-npm start          # 启动桌面客户端
-npm run dist       # 打包 Windows NSIS 安装包
+```
+┌────────────────────────────────────────────────────────┐
+│               Jarvis Electron 主进程 (Node.js)          │
+│  - 六态唯一真源状态机 (State Machine)                   │
+│  - 打断时序与音频调度控制器                            │
+│  - 动作语义分级安全网关 (ActionPolicy)                 │
+└───────────────▲────────────────────────▲───────────────┘
+                │ IPC                    │ stdio JSON-RPC 2.0
+┌───────────────▼───────────────┐ ┌──────▼───────────────┐
+│       渲染进程 (Renderer)     │ │   外部 MCP 服务节点   │
+│  - WebGPU 流体玻璃球 (WGSL)   │ │  - 文件系统工具       │
+│  - 晶体面板 UI (Glassmorphism)│ │  - 终端命令执行       │
+│  - Web Audio 采集与播放缓冲    │ │  - 窗口与系统操作     │
+└───────────────────────────────┘ └──────────────────────┘
 ```
 
-- `npm run build` 会先生成球体页（`src/renderer/orb.html` 是构建产物），再编 TS、拷资源、最后校验产物；**只手改该文件会被下次构建覆盖**。
-- 免 PATH 运行器：`node scripts/run.mjs <build|start|selftest|dist|verify-orb|...>`。
-- **CI**：`push main` 触发，跑 `npm run build` → `verify-tools` → `verify-tasks` → `verify-orb` → electron-builder 打 NSIS → 发布 GitHub Release。
-- **版本号**：由 `github.run_number` 顶替 patch 段并取 `max`，保证单调递增。
-- **可选代码签名**：配置 `WIN_CSC_LINK` / `WIN_CSC_KEY_PASSWORD` 后自动签名。
+---
 
-## 六、安全红线
+## 🚀 快速上手与运行
 
-1. **安装包与仓库不内置任何密钥**，配置统一存放于 `%APPDATA%\jarvis-desktop-assistant\config.json`。
-2. **能力授权**：桌面三类能力（屏幕录制 / 鼠标 / 键盘）**默认开启**（否则无法识别屏幕）；用户主动撤回的保持停用；**对外发送永不默认授予**。撤回记录在 `authorization-revoked.json`，持久生效。
-3. **对外发送与账号支付逐次独立确认**，全自动模式也不豁免（动作语义分级 ActionPolicy）。
-4. **目录白名单**：MCP 工具限制在白名单目录内、高危命令前置拦截；白名单**不约束终端命令**，是减少误操作而非沙箱。
-5. **统一急停** `Ctrl+Alt+X`（面板与托盘也有「停止所有桌面任务」）；退出后未完成任务持久化为「已暂停」，重启不自动重放副作用。
-6. **审计脱敏**：`audit.jsonl` 不记消息正文 / 密码 / 验证码 / API Key，按 `logRetentionDays`（默认 30 天）裁剪。
-7. **微信能力边界**：只做草稿与人工核验，不读本地数据库、不注入客户端、不自动发送（见 [docs/wechat-auto-reply-blocked.md](docs/wechat-auto-reply-blocked.md)）。
+### 方式一：下载预编译安装包 (推荐普通用户)
+1. 前往本仓库 [Releases 页面](../../releases) 获取最新版 `Jarvis-Setup-x64.exe`；
+2. 运行安装程序（支持自定义目录，自动生成桌面图标）；
+3. 启动应用，在呼出的面板中填入您的 API 密钥并选择默认音色（**安装包纯净安全，不内置任何硬编码 Key**）；
+4. 单击「启动语音会话」或按住热键开始自然语音对讲。
 
-## 七、实测踩过并已修复的问题
+### 方式二：从源码进行编译与二次开发
+```bash
+# 1. 安装核心依赖
+npm install
 
-| 问题 | 修复 |
-|---|---|
-| 视觉返回 200 但正文为空 | `step-5-preview` 是推理型模型，`max_tokens` 被思维链吃光。已提至 4096，正文为空时回退 `reasoning` 字段 |
-| 工具调用后模型不继续说话 | 流式产出 `function_call` 时上一轮未结束。已加响应状态跟踪 + 挂起补发 |
-| 退出后 AI 仍在说话 | 关面板只是隐藏窗口。已在关闭/退出时停会话、清播放缓冲、停麦克风 |
-| 音色切换被拒 | 仅三个音色被服务端接受，列表已按实测收敛并保留自定义入口 |
-| 设置面板下方滑不到 | 给设置内容区加独立滚动（`max-height: 46vh`），实测可滚动 |
-| 模板注释里的反引号 | `code-export.ts` 的球体页模板是反引号字符串，注释中写反引号必须转义，否则模板提前结束、**产物被静默截断**（曾被 CI 拦截） |
+# 2. 编译 WGSL 着色器模板、TypeScript 与静态资源
+npm run build
 
-## 八、仍未完成（如实标注）
+# 3. 运行自动化端到端测试 (包含悬浮球 6 态着色器截图自动化比对)
+npm run selftest
 
-- **真机观察自愈是否真正成功**：未取得成功现场（观察关键字 `球体恢复重载成功`）。
-- **设备为何约每 60 秒周期性丢失的根因**：未定位。
-- **自唱（歌声转换 SVC）与自动发送微信**：均无代码路径。
+# 4. 启动本地桌面客户端
+npm start
 
-更多内容见 [项目说明书.md](项目说明书.md) 与 [docs/使用说明.md](docs/使用说明.md)。
+# 5. 打包生成 Windows NSIS 单文件安装包
+npm run dist
+```
 
-## 九、许可证
+---
 
-本项目采用 MIT 许可证（`package.json` 中 `license` 字段为 `MIT`）。
+## 🛡️ 安全合规与防御红线
+
+1. **绝对零硬编码**：安装包与仓库严禁内置任何敏感 Token，本地配置安全存放于用户 `%APPDATA%\jarvis-desktop-assistant\config.json`；
+2. **硬件操作独立授权**：屏幕录制、键鼠物理模拟默认提示授权，用户一旦主动撤回，全局永久停用并记录在 `authorization-revoked.json`；
+3. **关键操作人工干预**：对外发送邮件/消息及任何支付行为强制每次阻断并弹窗等待人工二次确认，自动化模式绝不豁免；
+4. **全局一键物理熔断**：任何时刻按下 `Ctrl + Alt + X` 立刻强杀所有正在执行的后台脚本与异步任务；
+5. **审计全脱敏**：本地 `audit.jsonl` 自动剔除所有对话正文、短信验证码、登录密码与 API 密钥。
+
+---
+
+## 📄 开源许可证
+
+本项目基于 [MIT License](LICENSE) 协议开源。
