@@ -108,6 +108,18 @@ export interface ScreenLayout {
 
 class DesktopController {
   private highlight = new HighlightOverlay();
+  /** R-26：typeText 的进程内串行队列，避免并发输入时 A 的文本粘进 B 的目标窗口 */
+  private typeQueue: Promise<unknown> = Promise.resolve();
+
+  /** 把任务串到 typeText 队列尾部：同一时刻只有一个文本注入在执行 */
+  private enqueueType<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.typeQueue.then(task, task);
+    this.typeQueue = run.then(
+      () => undefined,
+      () => undefined
+    );
+    return run;
+  }
 
   private async ps(script: string, timeoutMs = 20_000): Promise<string> {
     return new Promise((resolve, reject) => {
@@ -373,9 +385,14 @@ public class S {
     if (!confirmed) return "用户拒绝该输入操作。";
 
     checkPoint();
-    // 用剪贴板 + Ctrl+V 实现，避免特殊字符转义问题
-    const escaped = text.replace(/'/g, "''");
-    const script = `
+    // R-26：串行执行，且注入前保存原剪贴板、粘贴后恢复，避免无提示覆盖用户剪贴板。
+    // 仍在同一个 PowerShell 脚本内完成保存/粘贴/恢复，把剪贴板被占用的窗口期压到最小。
+    return this.enqueueType(async () => {
+      // 排队等待期间可能触发急停，进入注入前再检查一次
+      checkPoint();
+      // 用剪贴板 + Ctrl+V 实现，避免特殊字符转义问题
+      const escaped = text.replace(/'/g, "''");
+      const script = `
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type @"
 using System;
@@ -384,19 +401,42 @@ public class K {
   [DllImport("user32.dll")] public static extern void keybd_event(byte b, byte s, uint f, int e);
 }
 "@
+$prev = $null
+$prevFiles = $null
+$prevKind = 'none'
+try {
+  $prevFiles = Get-Clipboard -Format FileDropList -ErrorAction SilentlyContinue
+  if ($null -ne $prevFiles -and $prevFiles.Count -gt 0) { $prevKind = 'files' }
+  elseif ($null -ne (Get-Clipboard -Format Image -ErrorAction SilentlyContinue)) { $prevKind = 'image' }
+  else {
+    $prev = Get-Clipboard -Raw -ErrorAction Stop
+    if ($null -ne $prev) { $prevKind = 'text' }
+  }
+} catch { $prevKind = 'none' }
 Set-Clipboard -Value '${escaped}'
 Start-Sleep -Milliseconds 120
 [K]::keybd_event(0x11,0,0,0)   # Ctrl down
 [K]::keybd_event(0x56,0,0,0)   # V
 [K]::keybd_event(0x56,0,2,0)   # V up
 [K]::keybd_event(0x11,0,2,0)   # Ctrl up
+Start-Sleep -Milliseconds 120
+# 恢复原剪贴板：文本与文件列表可原样还原；图片无法通过 Set-Clipboard 还原，
+# 此时输出标记交由 Node 侧记审计并告警，避免静默丢失用户内容。
+if ($prevKind -eq 'text' -and $null -ne $prev) { Set-Clipboard -Value $prev }
+elseif ($prevKind -eq 'files') { Set-Clipboard -Path $prevFiles }
+elseif ($prevKind -eq 'image') { Write-Output 'JARVIS_CLIPBOARD_IMAGE_LOST' }
 "typed"
 `;
-    await this.ps(script);
-    const fg = await this.foregroundView();
-    safetyManager.audit("desktop_type", { length: text.length, preview: text.slice(0, 60), foregroundWindow: fg });
-    logger.info(`[Desktop] 已输入 ${text.length} 个字符`);
-    return `已输入文本（${text.length} 字符）`;
+      const out = await this.ps(script);
+      if (out.includes("JARVIS_CLIPBOARD_IMAGE_LOST")) {
+        logger.warn("[Desktop] 原剪贴板内容为图片，typeText 依赖剪贴板实现，无法自动还原");
+        safetyManager.audit("desktop_type_clipboard_lost", { kind: "image", length: text.length });
+      }
+      const fg = await this.foregroundView();
+      safetyManager.audit("desktop_type", { length: text.length, preview: text.slice(0, 60), foregroundWindow: fg });
+      logger.info(`[Desktop] 已输入 ${text.length} 个字符`);
+      return `已输入文本（${text.length} 字符）`;
+    });
   }
 
   /** 发送组合键，如 "ctrl+c"、"alt+f4"、"enter" */

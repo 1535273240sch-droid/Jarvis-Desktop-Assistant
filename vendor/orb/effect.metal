@@ -1785,8 +1785,9 @@ vertex ribbon_vs_mainOutput ribbon_vs_main(
                 + phase * 0.74 + layer * 1.17;
     metal::float3 ribbonDirection = metal::normalize(
         side * metal::cos(twist) + surfaceNormal * metal::sin(twist));
-    float widthEnvelope = (0.72 + 0.28
-        * metal::pow(metal::sin(theta * 1.5 + phase + layer), 2.0))
+    // R-64: 先取 sin 再自乘，避免 metal::pow 对可能为负的底数产生未定义结果
+    float s0 = metal::sin(theta * 1.5 + phase + layer);
+    float widthEnvelope = (0.72 + 0.28 * s0 * s0)
         * metal::mix(0.42, 1.0, metal::sqrt(metal::max(arcEnvelope, 0.0)));
     metal::float3 position = center
         + ribbonDirection * strip * u.ribbonWidth * 0.5 * widthEnvelope;

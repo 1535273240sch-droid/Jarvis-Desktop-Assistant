@@ -13,8 +13,11 @@
 import { _electron as electron } from "playwright-core";
 import path from "node:path";
 import fs from "node:fs";
+import { fileURLToPath } from "node:url";
 
-const ROOT = "C:/开发任务/Jarvis";
+// R-49：不要硬编码开发者本机路径（原为 "C:/开发任务/Jarvis"），否则在他人机器 / CI
+// 上必然失败。改为由脚本自身位置推导仓库根，任何检出位置都成立。
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function speechLike(ms) {
   const rate = 24000, n = Math.floor((rate * ms) / 1000), b = Buffer.alloc(n * 2);
@@ -173,7 +176,10 @@ if (panelPage) {
 }
 
 console.log(`\n================ 应用内联调结果：通过 ${pass}，失败 ${fail} ================`);
-fs.writeFileSync(path.join(ROOT, "docs/evidence/app-e2e.log"),
+// 证据目录可能尚未创建（如全新检出），先确保存在再落盘，避免脚本在收尾处崩溃。
+const evidenceDir = path.join(ROOT, "docs", "evidence");
+fs.mkdirSync(evidenceDir, { recursive: true });
+fs.writeFileSync(path.join(evidenceDir, "app-e2e.log"),
   `应用内真实端到端联调\n通过 ${pass}，失败 ${fail}\n`, "utf-8");
 await app.close();
 process.exit(fail === 0 ? 0 : 1);

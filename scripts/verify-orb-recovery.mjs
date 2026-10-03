@@ -262,20 +262,44 @@ try {
 
       const defaultStrength = Number(expectedFlow[defaultIdx]);
       const themeIdx = ["13", "15", "20", "23", "24"];
-      const deviating = themeIdx
-        .filter((k) => k in gotFlow)
+
+      // R-65：原实现只遍历「产物中存在的键」——把 5 个主题键从 audioFlowStrengths 里
+      // 全部删掉，filter 结果为空，断言照样通过（空洞通过）。这里改为两步显式断言：
+      // ① 先证明这 5 个索引是真实的流场风格索引（从 vendor presets.ts 的 styleFlowIndexes
+      //    复算），避免列表写错/过期后仍「碰巧」通过；
+      // ② 再按产物的解析语义断言「生效强度」与默认主题同档：表内已登记则必须等于默认档；
+      //    未登记则必须由产物里的 `?? defaultAudioStrength` 回退到默认档（下方单独断言）。
+      // 这样「键被删」不再无条件通过：删键后必须由回退路径兜底，否则回退表达式断言失败。
+      const presetsSrc = readUtf8("vendor/orb/src/presets.ts");
+      const flowIdxBlock = (presetsSrc.match(/styleFlowIndexes[^{]*\{([\s\S]*?)\}/) || [])[1] || "";
+      const idxOf = (name) => {
+        const m = flowIdxBlock.match(new RegExp(`\\b${name}\\s*:\\s*(\\d+)`));
+        return m ? m[1] : null;
+      };
+      const derivedThemeIdx = ["opal", "frost", "blueDrop", "refractiveBlob", "particleRibbon"].map(idxOf);
+      check(derivedThemeIdx.every((v) => v !== null) && JSON.stringify(derivedThemeIdx.map(String)) === JSON.stringify(themeIdx),
+        "5 套主题的流场索引与 presets.ts 的 styleFlowIndexes 一致", derivedThemeIdx.map(String).join(", "));
+
+      const registered = themeIdx.filter((k) => k in gotFlow);
+      const unregistered = themeIdx.filter((k) => !(k in gotFlow));
+      const deviating = registered
         .filter((k) => Number(gotFlow[k]) !== defaultStrength)
         .map((k) => `${k}=${gotFlow[k]}`);
       check(deviating.length === 0,
-        "5 套主题的音频强度与默认主题同档（无单独降档）",
+        "5 套主题的生效音频强度与默认主题同档（无单独降/升档）",
         deviating.length
           ? "偏离默认档：" + deviating.join(", ")
-          : `全部等于 ${defaultStrength}（或未登记 → 运行时回退到该值）`);
+          : (registered.length ? `表内登记 ${registered.join(",")} 均等于 ` : `均未登记，由回退表达式生效为 `) +
+            `${defaultStrength}` + (unregistered.length ? `（未登记 ${unregistered.join(",")} 走回退）` : ""));
 
       const defExpr = html.match(/const defaultAudioStrength = ([^;]*);/);
       check(Boolean(defExpr) && /audioFlowStrengths\s*\[\s*\d+\s*\]/.test(defExpr[1]),
         "defaultAudioStrength 取自默认主题的查表值（未登记风格与默认主题同档）",
         defExpr ? defExpr[1] : "(not found)");
+      // R-65 收口：删键之所以还能通过，前提是「未登记 → 回退默认档」这条路径真实存在。
+      // 必须显式断言它，否则有人删掉 `?? defaultAudioStrength` 后主题会静默失声（强度 0）。
+      check(/\?\?\s*defaultAudioStrength/.test(html),
+        "产物在未登记风格时回退到 defaultAudioStrength（删键不会静默失声）");
     }
   }
 } catch (e) {

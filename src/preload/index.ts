@@ -6,7 +6,9 @@ import { contextBridge, ipcRenderer } from "electron";
  * 安全原则：
  * - 渲染进程**永远拿不到 API Key**（所有外部调用都在主进程）
  * - 只暴露白名单方法，不透传 ipcRenderer 本体
- * - 球体页面与聊天面板共用本 preload，但按窗口类型分流
+ * - 球体页面与聊天面板共用本 preload：两个 bridge（electronBridge 与 jarvis）
+ *   对**所有窗口**无条件暴露，未按窗口类型分流（主进程未通过 additionalArguments
+ *   传递窗口类型，preload 也无从判断）。各页面只使用自己需要的那一个。
  */
 
 type Listener = (...args: any[]) => void;

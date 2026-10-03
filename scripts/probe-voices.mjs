@@ -1,6 +1,9 @@
 /**
  * 找出可用的实时语音 voice ID。
  * 策略：先用不带 voice 的 session.update 确认音频流程通；再逐个试候选音色名。
+ *
+ * 【手工诊断工具，非 CI 检查】本脚本供人工排查使用，正常结束即返回退出码 0
+ *（结论只输出到日志），不构成对产品的断言；不要接入 CI。
  */
 import fs from "node:fs";
 import path from "node:path";

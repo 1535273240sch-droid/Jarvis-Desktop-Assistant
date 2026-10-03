@@ -56,6 +56,11 @@ export class RealtimeClient extends EventEmitter {
   private rebuildTimer: NodeJS.Timeout | null = null;
   private statusTimer: NodeJS.Timeout | null = null;
   private reconnectAttempts = 0;
+  /**
+   * 是否允许自动重连。connect() 建立连接意图时置 true；disconnect() 置 false，
+   * 用于取消退避等待期间待执行的重连。重连决策以此为准，不再依赖计数器（原实现里
+   * 计数器先自增使 `|| this.reconnectAttempts > 0` 恒真，重连条件形同虚设）。
+   */
   private shouldReconnect = false;
   /** 本会话是否已产出过音频（用于音色锁定） */
   private producedAudio = false;
@@ -91,6 +96,8 @@ export class RealtimeClient extends EventEmitter {
 
     this.connecting = true;
     this.intentionalClose = false;
+    // 记录连接意图：此后若连接意外断开，scheduleReconnect 才允许自动重连。
+    this.shouldReconnect = true;
     this.emitStatus("connecting");
 
     const url = `${cfg.realtimeBaseUrl}?model=${encodeURIComponent(cfg.realtimeModel)}`;
@@ -155,8 +162,6 @@ export class RealtimeClient extends EventEmitter {
   }
 
   private scheduleReconnect(): void {
-    const cfg = configManager.get();
-    const r = cfg as any;
     const maxAttempts = 5;
     const base = 1000;
     const cap = 16000;
@@ -174,7 +179,9 @@ export class RealtimeClient extends EventEmitter {
     logger.info(`[Realtime] ${delay}ms 后尝试第 ${this.reconnectAttempts} 次重连`);
 
     setTimeout(() => {
-      if (this.shouldReconnect || this.reconnectAttempts > 0) this.connect();
+      // 只有仍处于「期望连接」状态才重连：disconnect()/dispose() 会把 shouldReconnect
+      // 置 false，从而取消退避期间待执行的重连。
+      if (this.shouldReconnect) this.connect();
     }, delay);
   }
 

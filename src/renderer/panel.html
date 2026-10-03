@@ -983,11 +983,14 @@ function onMessage(payload) {
   if (payload.toolCall) { renderTool(payload.toolCall); return; }
 
   if (payload.screenshot) {
-    const img = document.createElement('img');
-    img.className = 'shot';
-    img.src = payload.screenshot;
-    chat.appendChild(img);
-    chat.scrollTop = chat.scrollHeight;
+    // R-63: 仅接受白名单 scheme（本地截图 data:image/png;base64,），其余忽略
+    if (typeof payload.screenshot === 'string' && payload.screenshot.startsWith('data:image/png;base64,')) {
+      const img = document.createElement('img');
+      img.className = 'shot';
+      img.src = payload.screenshot;
+      chat.appendChild(img);
+      chat.scrollTop = chat.scrollHeight;
+    }
     return;
   }
 
@@ -1919,7 +1922,14 @@ $('btnMcpAddPreset').onclick = async () => {
   const id = $('mcpPreset').value;
   if (!id) { toast('请先选择一个服务器'); return; }
   const preset = MCP_PRESET_CACHE.find((x) => x.id === id);
-  const need = preset && preset.requires && preset.requires[0];
+  if (!preset) { toast('未找到该预设，请重新选择'); return; }
+  const requires = preset.requires || [];
+  // 本面板只有一个输入框：预设若声明多个必填项则无法在此填全，明确报错而不是静默生成残缺配置。
+  if (requires.length > 1) {
+    toast('该预设需要填写 ' + requires.length + ' 项，请在下方 JSON 中手工配置');
+    return;
+  }
+  const need = requires[0];
   const val = $('mcpPresetValue').value.trim();
   if (need && !val) { toast('请填写：' + need.label); return; }
 
@@ -1933,6 +1943,10 @@ $('btnMcpAddPreset').onclick = async () => {
     if (need.key === 'env') cfg.env = Object.assign({}, cfg.env || {}, { [need.name]: val });
     else cfg.args = (cfg.args || []).map((a) => (a === ('REPLACE_WITH_' + need.name.toUpperCase()) ? val : a));
   }
+  // 兜底：参数里仍有未替换的占位符（如 REPLACE_WITH_DIR），说明预设声明与 config 不一致，
+  // 此时加入列表会把占位符原样传给 npx —— 拒绝并提示手工配置。
+  const leftover = (cfg.args || []).find((a) => /^REPLACE_WITH_/i.test(String(a)));
+  if (leftover) { toast('该预设存在未替换的参数占位符：' + leftover + '，请手工配置'); return; }
   list.push(cfg);
   $('mcpServersJson').value = JSON.stringify(list, null, 2);
   $('mcpExtStatus').textContent = '已加入列表，点击「保存并重连」生效。';
@@ -2120,7 +2134,7 @@ function renderTasks() {
         (s.error ? '<span style="color:#ff5c5c"> ' + esc(s.error.slice(0, 120)) + '</span>' : '') + '</div>';
     }).join('');
     const btns = taskActionButton(t).map(([act, label]) =>
-      '<button data-task="' + t.taskId + '" data-act="' + act + '" style="padding:1px 8px">' + label + '</button>').join(' ');
+      '<button data-task="' + esc(t.taskId) + '" data-act="' + act + '" style="padding:1px 8px">' + label + '</button>').join(' ');
     const confirmHtml = t.confirm
       ? '<div style="margin:6px 0;padding:8px;border:1px solid #ffb020;border-radius:8px;background:rgba(255,176,32,.08)">' +
         '<b>🖐 ' + esc(t.confirm.title) + '</b><div style="margin:4px 0;word-break:break-all">' + esc(t.confirm.detail) + '</div>' +
@@ -2135,15 +2149,15 @@ function renderTasks() {
               : '')
           : '') +
         '<div class="row" style="margin-top:6px">' +
-        '<button data-task="' + t.taskId + '" data-act="confirm" data-req="' + t.confirm.requestId + '" data-ok="1" class="primary" style="padding:1px 8px">确认</button>' +
-        '<button data-task="' + t.taskId + '" data-act="confirm" data-req="' + t.confirm.requestId + '" data-ok="0" class="danger" style="padding:1px 8px">取消</button>' +
+        '<button data-task="' + esc(t.taskId) + '" data-act="confirm" data-req="' + esc(t.confirm.requestId) + '" data-ok="1" class="primary" style="padding:1px 8px">确认</button>' +
+        '<button data-task="' + esc(t.taskId) + '" data-act="confirm" data-req="' + esc(t.confirm.requestId) + '" data-ok="0" class="danger" style="padding:1px 8px">取消</button>' +
         '</div></div>'
       : '';
     const resultHtml = t.result
       ? '<details style="margin-top:4px"><summary>查看结果</summary><div style="white-space:pre-wrap;word-break:break-all;margin:4px 0">' + esc(t.result.summary) + '</div>' +
         (t.result.artifacts && t.result.artifacts.length
           ? '<div>产物：' + t.result.artifacts.map((f) =>
-              '<button data-task="' + t.taskId + '" data-act="read" data-file="' + esc(f) + '" style="padding:0 6px">' + esc(f) + '</button>').join(' ') + '</div>'
+              '<button data-task="' + esc(t.taskId) + '" data-act="read" data-file="' + esc(f) + '" style="padding:0 6px">' + esc(f) + '</button>').join(' ') + '</div>'
           : '') + '</details>'
       : '';
     return '<div style="margin:8px 0;padding:8px;border:1px solid #2a2f3a;border-radius:10px">' +
@@ -2168,7 +2182,7 @@ function renderTasks() {
           const pg = await api.taskResultPage({ taskId, file, page });
           if (!pg) { toast('读取产物失败'); return; }
           const more = pg.page < pg.total
-            ? '\n\n<button data-task="' + taskId + '" data-act="read" data-file="' + file + '" data-page="' + (pg.page + 1) + '">下一页</button>'
+            ? '\n\n<button data-task="' + esc(taskId) + '" data-act="read" data-file="' + esc(file) + '" data-page="' + (pg.page + 1) + '">下一页</button>'
             : '';
           box.innerHTML = '<div style="padding:8px;border:1px solid #2a2f3a;border-radius:10px"><b>' + esc(file) + '（第 ' + pg.page + '/' + pg.total + ' 页）</b>' +
             '<div style="white-space:pre-wrap;word-break:break-all;margin:6px 0">' + esc(pg.content) + '</div>' + more +
@@ -2255,8 +2269,9 @@ const CAP_LABEL = {
 async function loadAuthz() {
   try {
     const st = await api.authzGet();
-    const revoked = st.state === 'revoked' ? st.scope : [];
-    const active = st.state === 'granted' || st.state === 'partial' ? st.scope : [];
+    // scope 统一表示「当前生效（已授予且未撤回）」的能力；撤回项由 revoked 承载。
+    const revoked = Array.isArray(st.revoked) ? st.revoked : [];
+    const active = st.state === 'none' ? [] : st.scope;
     const caps = ['screen-capture', 'mouse-control', 'keyboard-control', 'external-send'];
     $('authzBox').innerHTML = caps.map((c) => {
       const on = active.includes(c) && !revoked.includes(c);

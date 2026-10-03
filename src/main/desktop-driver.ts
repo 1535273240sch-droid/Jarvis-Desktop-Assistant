@@ -25,6 +25,39 @@ export interface WindowInfo {
   hwnd: number;
 }
 
+/**
+ * 构造 PowerShell 的 Start-Process 启动脚本（R-55）。
+ *
+ * orchestrator.launchApp 与 desktop-driver.launchByName 曾各自维护一份几乎相同的
+ * 构造逻辑，容易改一处漏一处。此处抽出唯一实现，两处调用方共用。
+ *
+ * 两处对成功输出的文本要求略有不同，故用 okExpr/goneExpr 参数化（保持各自原行为）：
+ *  - desktop-driver：进程对象存在输出 'ok'，拿不到输出 'gone'
+ *  - orchestrator：进程对象存在输出 'ok pid=<id>'，兜底 'ok'
+ * kind==="path"（仅 PATH 里的名字）统一走 Start-Process，不加 -PassThru。
+ */
+export function buildStartProcessScript(opts: {
+  launchPath: string;
+  args?: string;
+  kind: "exe" | "lnk" | "path";
+  /** 非 path 分支：进程对象存在时输出的 PowerShell 片段 */
+  okExpr?: string;
+  /** 非 path 分支：进程对象为空时输出的 PowerShell 片段 */
+  goneExpr?: string;
+}): string {
+  const esc = (s: string) => String(s).replace(/'/g, "''");
+  const argsPart = opts.args ? ` -ArgumentList '${esc(opts.args)}'` : "";
+  if (opts.kind === "path") {
+    return `Start-Process -FilePath '${esc(opts.launchPath)}'${argsPart} -ErrorAction Stop; 'ok'`;
+  }
+  const okExpr = opts.okExpr ?? "'ok'";
+  const goneExpr = opts.goneExpr ?? "'gone'";
+  return (
+    `$p = Start-Process -FilePath '${esc(opts.launchPath)}'${argsPart}` +
+    ` -PassThru -ErrorAction Stop; if ($p) { ${okExpr} } else { ${goneExpr} }`
+  );
+}
+
 export class DesktopDriver {
   /* ---------------- PowerShell 基础 ---------------- */
 
@@ -122,11 +155,7 @@ if ($p -and $p.MainWindowHandle -ne 0) { [FW]::ShowWindow($p.MainWindowHandle, 9
   async launchByName(name: string, args = ""): Promise<string | null> {
     const candidates = await appCatalog.resolve(name);
     for (const app of candidates.slice(0, 3)) {
-      const esc = (s: string) => String(s).replace(/'/g, "''");
-      const script =
-        app.kind === "path"
-          ? `Start-Process -FilePath '${esc(app.launchPath)}'${args ? ` -ArgumentList '${esc(args)}'` : ""} -ErrorAction Stop; 'ok'`
-          : `$p = Start-Process -FilePath '${esc(app.launchPath)}'${args ? ` -ArgumentList '${esc(args)}'` : ""} -PassThru -ErrorAction Stop; if ($p) { 'ok' } else { 'gone' }`;
+      const script = buildStartProcessScript({ launchPath: app.launchPath, args, kind: app.kind });
       const ok = await this.ps(script, 20_000).then((r) => /ok/.test(r)).catch(() => false);
       if (ok) {
         safetyManager.audit("task_launch_app", { name, resolved: app.name });

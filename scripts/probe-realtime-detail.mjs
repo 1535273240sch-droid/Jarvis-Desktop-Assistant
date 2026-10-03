@@ -3,6 +3,9 @@
  *   A. response.audio.delta / response.audio_transcript.delta 在本轮未被记录（但第 2 组收到了音频）
  *   B. server_vad 模式下 speech_stopped 是否真的推送
  *   C. 同时确认「client_websocket_error」这条 error 是什么
+ *
+ * 【手工诊断工具，非 CI 检查】本脚本供人工排查使用，恒返回退出码 0（结论只输出到日志，
+ * 不体现在退出码上），不构成对产品的断言；不要接入 CI。
  */
 import fs from "node:fs";
 import path from "node:path";

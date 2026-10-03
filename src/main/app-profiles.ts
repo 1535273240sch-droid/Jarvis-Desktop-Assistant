@@ -14,10 +14,6 @@ export function getProfiles(): AppProfile[] {
   return DEFAULT_CONFIG.appProfiles ?? [];
 }
 
-export function getProfile(id: string): AppProfile | null {
-  return getProfiles().find((p) => p.id === id) ?? null;
-}
-
 export function saveProfiles(profiles: AppProfile[]): AppProfile[] {
   // 基础校验：id/displayName 必填且唯一
   const seen = new Set<string>();

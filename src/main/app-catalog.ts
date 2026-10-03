@@ -29,10 +29,17 @@ export interface InstalledApp {
   kind: "exe" | "lnk" | "path";
   /** 归一化后的别名，用于模糊匹配 */
   aliases: string[];
+  /** 模糊匹配得分（仅 resolve / resolveCandidates 返回时附带，scan 原始结果不带） */
+  score?: number;
 }
 
+/** R-25：允许调用方「直接启动」的高置信阈值。低于此分的候选只能作为「需澄清」返回。 */
+export const LAUNCH_CONFIDENCE_SCORE = 80;
+/** 进入候选列表的最低分（低于此分视为噪音，直接丢弃） */
+const CANDIDATE_MIN_SCORE = 40;
+
 /** 中文名 -> 常见英文/进程名映射，让「打开浏览器」能命中具体程序 */
-const ALIAS_HINTS: Array<{ keys: string[]; targets: string[] }> = [
+const ALIAS_HINTS: Array<{ keys: string[]; targets: string[]; exactTargets?: string[] }> = [
   { keys: ["浏览器", "网页", "上网", "browser", "web", "internet"], targets: ["浏览器", "edge", "chrome", "firefox", "browser", "iexplore", "fhbrowser"] },
   { keys: ["计算器", "calculator", "calc"], targets: ["calc", "计算器", "calculator"] },
   { keys: ["记事本", "notepad", "文本编辑"], targets: ["notepad", "记事本"] },
@@ -42,7 +49,7 @@ const ALIAS_HINTS: Array<{ keys: string[]; targets: string[] }> = [
   { keys: ["任务管理器", "task manager", "taskmgr"], targets: ["taskmgr", "任务管理器"] },
   { keys: ["微信", "wechat", "weixin"], targets: ["wechat", "微信", "weixin"] },
   { keys: ["qq"], targets: ["qq"] },
-  { keys: ["代码", "编辑器", "vscode", "vs code", "code"], targets: ["code", "visual studio code", "vscode"] },
+  { keys: ["代码", "编辑器", "vscode", "vs code", "code"], targets: ["visual studio code", "vscode"], exactTargets: ["code"] },
 ];
 
 function norm(s: string): string {
@@ -183,8 +190,15 @@ foreach ($k in @('HKLM:\\SOFTWARE\\Clients\\StartMenuInternet','HKCU:\\SOFTWARE\
     $n = $_.PSChildName
     $cmd = (Get-ItemProperty "$($_.PSPath)\\shell\\open\\command" -ErrorAction SilentlyContinue).'(default)'
     if ($cmd) {
-      $exe = $cmd.Trim('"')
-      $exe = $exe -replace '^"([^"]+)".*$','$1'
+      # R-28：命令形态有两种，必须分别解析，否则会把参数当成 exe 路径
+      #   有引号："C:\\...\\browser.exe" --arg  -> 取第一对引号内的路径
+      #   无引号：C:\\...\\browser.exe --arg     -> 按第一个空白截断
+      $exe = $cmd.Trim()
+      if ($exe.StartsWith('"')) {
+        if ($exe -match '^"([^"]+)"') { $exe = $Matches[1] }
+      } else {
+        $exe = ($exe -split '\\s+')[0]
+      }
       $out += "$n|$exe"
     }
   }
@@ -213,14 +227,30 @@ $out | Select-Object -Unique
   }
 
   /**
-   * 按用户说法解析目标程序。
+   * 按用户说法解析目标程序（R-25 收紧后：只返回「高置信」候选）。
    * 例：`浏览器` -> 本机注册的浏览器；`Edge` -> Microsoft Edge；`计算器` -> calc.exe
-   * 返回按匹配度排序的候选（可能多个，供上层选择合适的那个）。
+   *
+   * 调用约定：本方法只返回 score >= LAUNCH_CONFIDENCE_SCORE 的候选，调用方
+   * 可以安全地直接启动 candidates[0]。40~79 分的中置信候选不在此返回，需澄清时
+   * 请改用 resolveCandidates()。
    */
   async resolve(query: string): Promise<InstalledApp[]> {
+    const { confident } = await this.resolveCandidates(query);
+    return confident;
+  }
+
+  /**
+   * R-25：把候选按置信度分层返回。
+   *   - confident：score >= 80，可直接启动；
+   *   - uncertain：40 <= score < 80，命中不够确定，应交给模型/用户澄清后再启动。
+   * 候选附带 score 字段，便于调用方展示与排序。
+   */
+  async resolveCandidates(
+    query: string
+  ): Promise<{ confident: InstalledApp[]; uncertain: InstalledApp[] }> {
     const apps = await this.scan();
     const q = norm(query);
-    if (!q) return [];
+    if (!q) return { confident: [], uncertain: [] };
 
     const scores = new Map<InstalledApp, number>();
     const bump = (a: InstalledApp, n: number) => scores.set(a, (scores.get(a) || 0) + n);
@@ -228,39 +258,80 @@ $out | Select-Object -Unique
     /** 明显是系统内部组件而非用户应用的名称，降权（避免 browser_broker 之类被当成浏览器） */
     const isInternal = (a: InstalledApp) =>
       /broker|export|helper|service|host|runtime|update|crashpad|setup|installer|launcher|daemon/i.test(a.name) ||
-      /windows\\(system32|syswow64)\\/i.test(a.launchPath);
+      /windows\\(system32|syswow64)\//i.test(a.launchPath);
+
+    /**
+     * R-25：System32/SysWOW64 等系统目录下由 PATH 扫描收录的通用工具（别名=文件名），
+     * 极易被「同名即匹配」误命中（如 find.exe、where.exe）。这类工具重罚到候选区间以下，
+     * 避免直接启动系统内部命令；用户确实想用时可在澄清流程里确认。
+     * 注意：只罚 kind==="path" 的扫描项，不罚上面显式加入的常用系统程序（kind==="exe"）。
+     */
+    const isSystemUtility = (a: InstalledApp) =>
+      a.kind === "path" &&
+      /[\\/](system32|syswow64|winsxs|windowspowershell)[\\/]/i.test(a.launchPath);
+
+    /**
+     * 单个别名的匹配强度（取该应用所有别名中的最高分）：
+     *   100 完全相同（唯一可靠信号）
+     *    70 前缀/后缀命中（edge -> microsoftedge、code -> visualstudiocode）
+     *    50 任意子串命中（弱信号，单独不足以直接启动）
+     * 相比旧的「互相包含即 60」，避免把 findstr / wordpad / javaw 这类近似名当成目标。
+     */
+    const scoreAlias = (a: InstalledApp, query: string): number => {
+      let best = 0;
+      for (const al of a.aliases) {
+        if (!al || al.length < 2) continue;
+        if (al === query) return 100;
+        if (query.length >= 2 && (al.startsWith(query) || al.endsWith(query) || query.startsWith(al) || query.endsWith(al))) {
+          best = Math.max(best, 70);
+          continue;
+        }
+        if (query.length >= 2 && (al.includes(query) || query.includes(al))) {
+          best = Math.max(best, 50);
+        }
+      }
+      return best;
+    };
 
     /** 真实浏览器/应用的可执行文件名，命中则显著加分 */
     const REAL_APPS = /\b(msedge|chrome|firefox|iexplore|fhbrowser|calc|notepad|mspaint|explorer|taskmgr|wechat|weixin|qq|code|mstsc|snippingtool)\b/i;
 
     // 1) 直接命中名称/别名
     for (const a of apps) {
-      let s = 0;
-      if (a.aliases.some((al) => al === q)) s = 100;
-      else if (a.aliases.some((al) => al.length >= 2 && (al.includes(q) || q.includes(al)))) s = 60;
+      let s = scoreAlias(a, q);
       if (!s) continue;
       if (isInternal(a)) s -= 50;
+      if (isSystemUtility(a)) s -= 60;
       if (REAL_APPS.test(path.basename(a.launchPath))) s += 15;
       bump(a, s);
     }
 
-    // 2) 走中文别名映射（「浏览器」这类泛指）
+    // 2) 走中文别名映射（「浏览器」这类泛指）。这是人工维护的白名单，命中即可靠。
     for (const hint of ALIAS_HINTS) {
       const hit = hint.keys.some((k) => q.includes(norm(k)) || norm(k).includes(q));
       if (!hit) continue;
       for (const a of apps) {
         const base = path.basename(a.launchPath);
-        const targetHit = hint.targets.some((t) => {
+        const baseNoExt = norm(base.replace(/\.(exe|lnk)$/i, ""));
+        // 泛化目标用子串匹配（"edge" 命中 msedge.exe、"浏览器" 命中 QQ浏览器）
+        const looseHit = hint.targets.some((t) => {
           const nt = norm(t);
           return a.aliases.some((al) => al.includes(nt)) || norm(base).includes(nt);
         });
-        if (!targetHit) continue;
+        // exactTargets 要求别名或去扩展名的文件名**完全相等**：让 "code" 只命中 Code.exe
+        // （VS Code），不会命中 Command Code / ZCode / codex 这类近似名。
+        const exactHit = (hint.exactTargets || []).some((t) => {
+          const nt = norm(t);
+          return a.aliases.some((al) => al === nt) || baseNoExt === nt;
+        });
+        if (!looseHit && !exactHit) continue;
         // 只有别名/文件名里真的出现目标名才给高分，避免目录名误伤
-        let s = 40;
+        let s = 50;
         if (REAL_APPS.test(base)) s += 25;
-        if (a.kind === "exe") s += 8;
-        else if (a.kind === "lnk") s += 4;
+        if (a.kind === "exe") s += 10;
+        else if (a.kind === "lnk") s += 6;
         if (isInternal(a)) s -= 45;
+        if (isSystemUtility(a)) s -= 60;
         bump(a, s);
       }
     }
@@ -272,10 +343,14 @@ $out | Select-Object -Unique
       }
     }
 
-    return [...scores.entries()]
+    const scored = [...scores.entries()]
+      .filter(([, s]) => s >= CANDIDATE_MIN_SCORE)
       .sort((a, b) => b[1] - a[1])
-      .map(([a]) => a)
-      .filter((a) => (scores.get(a) || 0) >= 40);
+      .map(([a, s]) => ({ ...a, score: s }));
+    return {
+      confident: scored.filter((a) => (a.score || 0) >= LAUNCH_CONFIDENCE_SCORE),
+      uncertain: scored.filter((a) => (a.score || 0) < LAUNCH_CONFIDENCE_SCORE),
+    };
   }
 
   /** 供提示词使用的「本机可用程序」摘要（只列常用的，避免提示词过长） */

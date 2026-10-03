@@ -64,8 +64,11 @@ export function setupProtocolHandler(): void {
 
       const filePath = path.normalize(path.join(rendererDir, rel));
 
-      // 目录穿越防护
-      if (!filePath.startsWith(rendererDir)) {
+      // 目录穿越防护：用 path.relative 判断，而不是前缀 startsWith ——
+      // 前缀检查会把同级目录「renderer2/」误判为合法（rendererDir/../renderer2/x
+      // normalize 后仍以 rendererDir 开头）。相对结果必须以 ".." 开头或为绝对路径时拒绝。
+      const relToRoot = path.relative(rendererDir, filePath);
+      if (relToRoot === ".." || relToRoot.startsWith(".." + path.sep) || path.isAbsolute(relToRoot)) {
         logger.warn(`[Protocol] 拒绝越权路径：${filePath}`);
         return new Response("Forbidden", { status: 403 });
       }

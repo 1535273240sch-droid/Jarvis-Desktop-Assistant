@@ -1,6 +1,9 @@
 /**
  * 定点验证：server_vad 自动响应是否产出音频。
  * 对比「session.update 里带 modalities」与「不带」，确认修复是否有效。
+ *
+ * 【手工诊断工具，非 CI 检查】本脚本供人工排查使用，恒返回退出码 0（结论只输出到日志，
+ * 不体现在退出码上），不构成对产品的断言；不要接入 CI。
  */
 import fs from "node:fs";
 import path from "node:path";

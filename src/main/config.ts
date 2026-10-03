@@ -161,6 +161,9 @@ export const DEFAULT_CONFIG: JarvisConfig = {
   emergencyStopAccelerator: "Control+Alt+X",
   // 自动更新默认关闭：见 types.ts 中 autoUpdate 的说明
   autoUpdate: false,
+  // WebGPU/GPU 兼容开关（enable-unsafe-webgpu / ignore-gpu-blocklist / enable-gpu-rasterization）：
+  // 默认开启以保持既有行为；在黑名单驱动上反复崩溃时可设为 false 关闭。需重启应用生效。
+  gpuCompatFlags: true,
   // 审计日志保留天数（项目书 P0：日志留存规则）
   logRetentionDays: 30,
   // 目标软件档案（项目书 §2.2）：微信为内置示例；编码 Agent 只给空白模板，
@@ -210,6 +213,8 @@ export const DEFAULT_CONFIG: JarvisConfig = {
 // [secret-guard patch] 外部 MCP 服务器配置的脱敏与还原
 const SECRET_SENTINEL = "***";
 const SECRET_FLAG_RE = /(^|--|-)[^\s=]*(key|token|secret|passwd|password|auth)/i;
+/** getMasked 默认拒绝：键名命中即视为疑似密钥字段，一律不下发给渲染进程 */
+const SENSITIVE_CONFIG_KEY_RE = /key|token|secret|password|credential|auth/i;
 
 /** 对下发给渲染进程/日志的 mcpServers 做深度脱敏：env 值全掩码，args 中疑似密钥值掩码 */
 export function redactServerSecrets(servers: unknown): unknown {
@@ -283,6 +288,14 @@ class ConfigManager {
     }
     this.filePath = path.join(dir, "config.json");
     this.config = this.load();
+    // 把日志留存天数注入 logger，并在启动时按留存策略清理 errors.jsonl。
+    // logger 不反向依赖 config（避免循环引用），所以由这里单向注入。
+    try {
+      logger.setRetentionDays(this.config.logRetentionDays ?? 30);
+      logger.pruneErrorLog();
+    } catch (e) {
+      logger.warn("[Config] 错误日志留存清理失败:", e);
+    }
   }
 
   private load(): JarvisConfig {
@@ -433,24 +446,30 @@ class ConfigManager {
   /** 脱敏视图：可安全下发给渲染进程或写日志 */
   getMasked(): Record<string, unknown> {
     const c = this.get();
-    return {
-      ...c,
-      apiKey: c.apiKey ? `***${c.apiKey.slice(-4)}` : "",
-      apiKeyPresent: c.apiKey.length > 0,
-      visionApiKey: c.visionApiKey ? `***${c.visionApiKey.slice(-4)}` : "",
-      visionApiKeyPresent: Boolean(c.visionApiKey && c.visionApiKey.length > 0),
-      // 音乐专属 Key 同样只下发脱敏视图，避免经 CONFIG_GET 泄露到渲染进程
-      musicApiKey: c.musicApiKey ? `***${c.musicApiKey.slice(-4)}` : "",
-      musicApiKeyPresent: Boolean(c.musicApiKey && c.musicApiKey.length > 0),
-      // 信息简报与 GitHub 的密钥同样只下发脱敏视图：getMasked 会先展开全部配置，
-      // 任何不在这里显式覆盖的新增密钥字段都会原样泄露到渲染进程
-      briefApiKey: c.briefApiKey ? `***${c.briefApiKey.slice(-4)}` : "",
-      briefApiKeyPresent: Boolean(c.briefApiKey && c.briefApiKey.length > 0),
-      githubToken: c.githubToken ? `***${c.githubToken.slice(-4)}` : "",
-      githubTokenPresent: Boolean(c.githubToken && c.githubToken.length > 0),
-      // [secret-guard patch] 外部 MCP 服务器配置（env 与 args 中的密钥）不下发明文
-      mcpServers: redactServerSecrets(c.mcpServers),
-    };
+    // 默认拒绝：先按 key 名剔除所有疑似敏感字段，再显式放行需要下发的脱敏视图。
+    // 旧实现先 ...c 展开全部配置、再逐个覆盖已知密钥，任何新增密钥字段都会原样泄露；
+    // 改为默认拒绝后，新增密钥字段默认不会下发，需显式放行才会出现。
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(c)) {
+      if (SENSITIVE_CONFIG_KEY_RE.test(k)) continue;
+      out[k] = v;
+    }
+    // 显式放行的密钥字段一律只下发脱敏视图（键集合与改造前保持一致）
+    out.apiKey = c.apiKey ? `***${c.apiKey.slice(-4)}` : "";
+    out.apiKeyPresent = c.apiKey.length > 0;
+    out.visionApiKey = c.visionApiKey ? `***${c.visionApiKey.slice(-4)}` : "";
+    out.visionApiKeyPresent = Boolean(c.visionApiKey && c.visionApiKey.length > 0);
+    // 音乐专属 Key 同样只下发脱敏视图，避免经 CONFIG_GET 泄露到渲染进程
+    out.musicApiKey = c.musicApiKey ? `***${c.musicApiKey.slice(-4)}` : "";
+    out.musicApiKeyPresent = Boolean(c.musicApiKey && c.musicApiKey.length > 0);
+    // 信息简报与 GitHub 的密钥同样只下发脱敏视图
+    out.briefApiKey = c.briefApiKey ? `***${c.briefApiKey.slice(-4)}` : "";
+    out.briefApiKeyPresent = Boolean(c.briefApiKey && c.briefApiKey.length > 0);
+    out.githubToken = c.githubToken ? `***${c.githubToken.slice(-4)}` : "";
+    out.githubTokenPresent = Boolean(c.githubToken && c.githubToken.length > 0);
+    // [secret-guard patch] 外部 MCP 服务器配置（env 与 args 中的密钥）不下发明文
+    out.mcpServers = redactServerSecrets(c.mcpServers);
+    return out;
   }
 
   hasApiKey(): boolean {

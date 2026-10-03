@@ -128,23 +128,3 @@ export const MCP_PRESETS: McpPreset[] = [
     },
   },
 ];
-
-/** 把预设实例化成可用配置，填入用户提供的参数 */
-export function instantiatePreset(
-  presetId: string,
-  values: Record<string, string>
-): McpServerConfig | null {
-  const p = MCP_PRESETS.find((x) => x.id === presetId);
-  if (!p) return null;
-  const cfg: McpServerConfig = JSON.parse(JSON.stringify(p.config));
-  for (const req of p.requires || []) {
-    const v = values[req.name];
-    if (!v) continue;
-    if (req.key === "env") {
-      cfg.env = { ...(cfg.env || {}), [req.name]: v };
-    } else {
-      cfg.args = (cfg.args || []).map((a) => (a === `REPLACE_WITH_${req.name.toUpperCase()}` ? v : a));
-    }
-  }
-  return cfg;
-}
