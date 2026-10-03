@@ -232,6 +232,8 @@
   .msg.system {
     align-self: center; max-width: 96%; text-align: center;
     color: var(--text-muted); font-size: 12.5px; background: transparent;
+    /* 简报在面板里是多行文本（序号 + 一句话说明 + 链接），不换行会挤成一坨 */
+    white-space: pre-wrap; word-break: break-word;
   }
 
   /* 思考状态：银白流动微光 */
@@ -675,6 +677,70 @@
             <button id="btnSaveMusicKey">保存</button>
           </div>
           <div class="hint" id="musicKeyHint">未单独配置，默认沿用主 API Key</div>
+        </div>
+
+        <div class="field">
+          <label>信息简报（新闻 / GitHub 热门，一句话整理并播报）</label>
+          <div class="row">
+            <select id="briefEnabled">
+              <option value="on">开启（说「最近有什么新闻」时取数、整理、播报）</option>
+              <option value="off">关闭</option>
+            </select>
+            <button id="btnSaveBrief">应用</button>
+          </div>
+          <div class="hint">整理默认复用「屏幕理解」的接口与 Key。<b>推荐单独指定一个响应快的非推理模型</b>（推理型模型可能超过 20 秒，超时会退回只念标题的简版）。填写接口地址后必须同时填写模型 ID 与专属 Key，主 Key 不会发给第三方。</div>
+        </div>
+
+        <div class="field">
+          <label>简报整理接口地址（可选，OpenAI 兼容）</label>
+          <div class="row">
+            <input id="briefBaseUrl" placeholder="留空 = 复用屏幕理解的接口" />
+            <button id="btnSaveBriefUrl">应用</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>简报整理模型 ID（可选）</label>
+          <div class="row">
+            <input id="briefModel" placeholder="留空 = 复用屏幕理解的模型" />
+            <button id="btnSaveBriefModel">应用</button>
+          </div>
+        </div>
+
+        <div class="field">
+          <label>简报整理专属 API Key（可选）</label>
+          <div class="row">
+            <input id="briefApiKey" type="password" placeholder="仅在填写了上面的接口地址时使用" autocomplete="off" />
+            <button id="btnSaveBriefKey">保存</button>
+          </div>
+          <div class="hint" id="briefKeyHint">未配置</div>
+        </div>
+
+        <div class="field">
+          <label>新闻源（每行一个 RSS 地址，留空 = 默认源）</label>
+          <div class="row">
+            <textarea id="briefFeeds" rows="4" placeholder="https://news.google.com/rss?hl=zh-CN&amp;gl=CN&amp;ceid=CN:zh-Hans"></textarea>
+            <button id="btnSaveBriefFeeds">应用</button>
+          </div>
+          <div class="hint">默认含 Google 新闻、BBC 中文、36氪；<b>36氪源已确认失效，请在下方替换成可用的 RSS</b>。留空即恢复默认。</div>
+        </div>
+
+        <div class="field">
+          <label>GitHub Token（可选）</label>
+          <div class="row">
+            <input id="githubToken" type="password" placeholder="只用于提高 API 限额，不需要勾选任何权限" autocomplete="off" />
+            <button id="btnSaveGithubToken">保存</button>
+          </div>
+          <div class="hint" id="githubTokenHint">未配置（匿名额度，通常够用）</div>
+        </div>
+
+        <div class="field">
+          <label>工具执行超时（长任务看门狗）</label>
+          <div class="row">
+            <input id="toolWatchdogMs" type="number" min="30" step="1" placeholder="600" />
+            <button id="btnSaveToolWatchdog">应用</button>
+          </div>
+          <div class="hint">单位：分钟。默认 10 分钟。编译、npm install、git clone 这类长命令不会再被 60 秒强制打断；调小则更快回收卡死的任务。</div>
         </div>
 
         <div class="field">
@@ -1435,6 +1501,22 @@ async function loadConfig() {
         ? ('已单独配置：' + c.musicApiKey)
         : '未单独配置，默认沿用主 API Key';
     }
+    // 信息简报回显（密钥只回显是否已配置，不回显明文）
+    if ($('briefEnabled')) $('briefEnabled').value = c.briefEnabled === false ? 'off' : 'on';
+    if ($('briefBaseUrl')) $('briefBaseUrl').value = c.briefBaseUrl || '';
+    if ($('briefModel')) $('briefModel').value = c.briefModel || '';
+    if ($('briefFeeds')) $('briefFeeds').value = (c.briefNewsFeeds || []).join('\n');
+    if ($('briefKeyHint')) {
+      $('briefKeyHint').textContent = c.briefApiKeyPresent ? ('已配置：' + c.briefApiKey) : '未配置';
+    }
+    if ($('githubTokenHint')) {
+      $('githubTokenHint').textContent = c.githubTokenPresent
+        ? ('已配置：' + c.githubToken)
+        : '未配置（匿名额度，通常够用）';
+    }
+    if ($('toolWatchdogMs')) {
+      $('toolWatchdogMs').value = Math.max(1, Math.round(Number(c.toolWatchdogMs || 600000) / 60000));
+    }
     // 悬浮球主题回显
     if ($('orbTheme')) $('orbTheme').value = c.orbTheme || 'siri';
     // 悬浮球尺寸与自适应回显
@@ -1640,6 +1722,50 @@ $('btnSaveMusicKey').onclick = async () => {
   await api.setConfig({ musicApiKey: v });
   $('musicApiKey').value = '';
   toast(v ? '音乐专属 Key 已保存' : '已清除独立音乐 Key，沿用主 Key');
+  loadConfig();
+};
+
+// —— 信息简报 ——
+$('btnSaveBrief').onclick = async () => {
+  const on = $('briefEnabled').value === 'on';
+  await api.setConfig({ briefEnabled: on });
+  toast(on ? '信息简报已开启' : '信息简报已关闭');
+  loadConfig();
+};
+$('btnSaveBriefUrl').onclick = async () => {
+  await api.setConfig({ briefBaseUrl: $('briefBaseUrl').value.trim() });
+  toast('简报整理接口地址已更新');
+  loadConfig();
+};
+$('btnSaveBriefModel').onclick = async () => {
+  await api.setConfig({ briefModel: $('briefModel').value.trim() });
+  toast('简报整理模型已更新');
+  loadConfig();
+};
+$('btnSaveBriefKey').onclick = async () => {
+  const v = $('briefApiKey').value.trim();
+  await api.setConfig({ briefApiKey: v });
+  $('briefApiKey').value = '';
+  toast(v ? '简报专属 Key 已保存' : '已清除简报专属 Key');
+  loadConfig();
+};
+$('btnSaveBriefFeeds').onclick = async () => {
+  const feeds = $('briefFeeds').value.split('\n').map((s) => s.trim()).filter((s) => /^https?:\/\//i.test(s));
+  await api.setConfig({ briefNewsFeeds: feeds });
+  toast(feeds.length ? ('新闻源已更新（' + feeds.length + ' 个）') : '已恢复默认新闻源');
+  loadConfig();
+};
+$('btnSaveGithubToken').onclick = async () => {
+  const v = $('githubToken').value.trim();
+  await api.setConfig({ githubToken: v });
+  $('githubToken').value = '';
+  toast(v ? 'GitHub Token 已保存' : '已清除 GitHub Token');
+  loadConfig();
+};
+$('btnSaveToolWatchdog').onclick = async () => {
+  const min = Math.max(1, Number($('toolWatchdogMs').value) || 10);
+  await api.setConfig({ toolWatchdogMs: Math.round(min * 60_000) });
+  toast('工具执行超时已设为 ' + min + ' 分钟');
   loadConfig();
 };
 

@@ -95,6 +95,14 @@ export const DEFAULT_INSTRUCTIONS = [
   "9. 任务进度用 get_task_status 查询；完整结果用 read_task_result 分页读取，不要凭记忆复述没读过的内容。",
   "10. 任务面板里的待确认项，只有用户明确表态后才能用 respond_task_confirm 答复；用户没表态就向用户转述待确认内容。",
   "",
+  "【信息简报】",
+  "11. 用户问新闻、热门项目等资讯时，用 get_briefing；返回的【播报稿】按稿口语播报，不要补充稿外的事实，播报完问一句要不要打开其中某条。",
+  "",
+  "【一次把话说完】",
+  "12. 用户给了包含多步的指令（如「建目录、写文件、再跑一次测试」）时，必须**依次调用工具把每一步都做完**，不要只做第一步就开始汇报。",
+  "    每一步都要以工具返回结果为准再决定下一步；全部做完后才给总结。若中途某步失败，如实说明失败在哪一步、已完成什么，不要谎称全部完成。",
+  "    用户说「打开前三个」这类复数指令时，要按数量逐个调用，不要只做一次就宣称已全部完成。",
+  "",
   "【执行纪律】",
   "- 只有真正调用工具并拿到成功结果后，才能说「已经完成」。工具报错或没执行时，必须如实告知，不要假装成功。",
   "- 同一手法失败不要反复重试；换一种方式（例如改用 open_app）或如实说明失败原因。",
@@ -190,6 +198,13 @@ export const DEFAULT_CONFIG: JarvisConfig = {
   // 悬浮球基准尺寸与「随状态自适应」开关（默认关闭，避免无预期地改变用户看到的球）
   orbSize: ORB_SIZE_DEFAULT,
   orbAutoScale: false,
+  // 信息简报：整理模型留空 = 复用视觉模型（见 briefing-runtime.ts 的 getBriefLlm）
+  briefEnabled: true,
+  briefModel: "",
+  briefBaseUrl: "",
+  briefNewsFeeds: [],
+  // 工具执行看门狗：长任务不应被 60s 掐断，默认放宽到 10 分钟
+  toolWatchdogMs: 600_000,
 };
 
 // [secret-guard patch] 外部 MCP 服务器配置的脱敏与还原
@@ -427,6 +442,12 @@ class ConfigManager {
       // 音乐专属 Key 同样只下发脱敏视图，避免经 CONFIG_GET 泄露到渲染进程
       musicApiKey: c.musicApiKey ? `***${c.musicApiKey.slice(-4)}` : "",
       musicApiKeyPresent: Boolean(c.musicApiKey && c.musicApiKey.length > 0),
+      // 信息简报与 GitHub 的密钥同样只下发脱敏视图：getMasked 会先展开全部配置，
+      // 任何不在这里显式覆盖的新增密钥字段都会原样泄露到渲染进程
+      briefApiKey: c.briefApiKey ? `***${c.briefApiKey.slice(-4)}` : "",
+      briefApiKeyPresent: Boolean(c.briefApiKey && c.briefApiKey.length > 0),
+      githubToken: c.githubToken ? `***${c.githubToken.slice(-4)}` : "",
+      githubTokenPresent: Boolean(c.githubToken && c.githubToken.length > 0),
       // [secret-guard patch] 外部 MCP 服务器配置（env 与 args 中的密钥）不下发明文
       mcpServers: redactServerSecrets(c.mcpServers),
     };

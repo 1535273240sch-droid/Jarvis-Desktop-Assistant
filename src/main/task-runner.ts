@@ -11,6 +11,8 @@ import type { WindowInfo } from "./desktop-driver";
 import { pickAgentProfile, profileConfigured } from "./app-profiles";
 import { buildDraft, draftDedupeKey } from "./wechat-draft";
 import { sanitizeToolOutput } from "./prompt-guard";
+import { summarizeDocs } from "./briefing";
+import { briefFetch, getBriefLlm } from "./briefing-runtime";
 import { IPC } from "../common/types";
 import type { DesktopTask, TaskKind, TaskStep, TaskConfirmRequest, TaskEvent, AppProfile, WechatDraftPayload } from "../common/types";
 
@@ -552,7 +554,7 @@ class TaskRunner extends EventEmitter {
     });
 
     // 步骤 3：逐页读取（≥2 页），记录标题/URL/正文摘录 —— 不编造
-    const pages: Array<{ url: string; title: string; excerpt: string }> = [];
+    const pages: Array<{ url: string; title: string; excerpt: string; text?: string }> = [];
     await this.runStep(task, 2, `读取前 ${wantCount} 个页面并记录来源`, async () => {
       // 断点恢复：从产物重建链接清单
       if (!links.length) {
@@ -572,7 +574,7 @@ class TaskRunner extends EventEmitter {
         try {
           const { text, finalUrl, title } = await this.fetchPage(link.url);
           const excerpt = text.slice(0, 1200);
-          pages.push({ url: finalUrl, title: title || link.title, excerpt });
+          pages.push({ url: finalUrl, title: title || link.title, excerpt, text: text.slice(0, 4000) });
           taskArtifacts.saveText(task.taskId, `page-${readOk + 1}.txt`, title || link.title, text, finalUrl);
           readOk += 1;
         } catch (e) {
@@ -593,25 +595,38 @@ class TaskRunner extends EventEmitter {
           const pg = taskArtifacts.readPage(task.taskId, info.file, 1, 50_000);
           if (!pg) continue;
           const body = pg.content.split("\n").filter((l) => !l.startsWith("# ")).join("\n").trim();
-          pages.push({ url: info.source || "", title: info.title, excerpt: body.slice(0, 1200) });
+          pages.push({ url: info.source || "", title: info.title, excerpt: body.slice(0, 1200), text: body.slice(0, 4000) });
         }
       }
+      // 真正交给模型归纳（原先这里全程不调模型，只是把原文拼起来）
+      const brief = await summarizeDocs(
+        query,
+        pages.map((p) => ({ title: p.title, url: p.url, text: p.text || p.excerpt })),
+        { llm: getBriefLlm(), fetch: briefFetch }
+      );
       const lines: string[] = [`# 「${query}」资料整理（仅基于实际读取的页面）`, ""];
+      if (brief) {
+        lines.push("## 整理结论（模型归纳，仅基于下列来源；来源编号对应下方「来源 N」）", "", brief, "");
+      }
       pages.forEach((p, i) => {
         lines.push(`## 来源 ${i + 1}：《${p.title}》`);
         lines.push(`URL: ${p.url}`);
         lines.push(`原文摘录: ${p.excerpt.replace(/\s+/g, " ").slice(0, 300)}…`);
         lines.push("");
       });
-      lines.push("说明：以上为各页面原文摘录与来源清单；下一步建议需结合这些内容由助手与用户确认。");
+      if (!brief) {
+        lines.push("说明：以上为各页面原文摘录与来源清单；下一步建议需结合这些内容由助手与用户确认。");
+      }
       const summary = lines.join("\n");
       const file = taskArtifacts.saveText(task.taskId, "summary.md", `「${query}」整理结果`, summary);
       this.succeed(
         task,
-        `已读取 ${pages.length} 个页面并生成整理结果（含来源 URL 与原文摘录）。完整内容见任务产物 summary.md。`,
+        brief
+          ? brief.slice(0, 800)
+          : `已读取 ${pages.length} 个页面并生成整理结果（含来源 URL 与原文摘录）。完整内容见任务产物 summary.md。`,
         [file]
       );
-      return { ok: true, observation: `整理完成：${pages.length} 个来源` };
+      return { ok: true, observation: `整理完成：${pages.length} 个来源${brief ? "（已由模型归纳）" : ""}` };
     });
   }
 

@@ -1,6 +1,6 @@
 {
   "name": "jarvis-desktop-assistant",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Jarvis - Windows 11 桌面 AI 助手（悬浮球 + 实时语音 + 工具执行 + 屏幕视觉）",
   "main": "dist/main/index.js",
   "author": "Jarvis Team",
@@ -12,6 +12,8 @@
     "start": "npm run build && electron .",
     "selftest": "npm run build && electron . --selftest",
     "verify:orb": "node scripts/run.mjs verify-orb",
+    "verify:briefing": "node scripts/run.mjs verify-briefing",
+    "verify:execution": "node scripts/run.mjs verify-execution",
     "dist": "npm run build && electron-builder --win nsis",
     "pack": "npm run build && electron-builder --win nsis --dir"
   },

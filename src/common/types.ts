@@ -302,6 +302,23 @@ export interface JarvisConfig {
    * 开启后仅在 orbSize 基准上乘倍率（聆听 ×1.06 / 播报 ×1.12），不改写基准。
    */
   orbAutoScale?: boolean;
+  /** 信息简报（get_briefing）总开关，默认 true */
+  briefEnabled?: boolean;
+  /** 简报整理模型 ID；留空 = 复用视觉模型（与视觉共用端点与 Key） */
+  briefModel?: string;
+  /** 简报整理接口地址（OpenAI 兼容）；填写后必须同时填 briefModel / briefApiKey */
+  briefBaseUrl?: string;
+  /** 简报整理专属 Key（仅在填写了 briefBaseUrl 时使用） */
+  briefApiKey?: string;
+  /** 新闻 RSS 源，每项一个 URL；空数组 = 使用内置默认 */
+  briefNewsFeeds?: string[];
+  /** GitHub Token（可选，仅用于提高 Search API 限额，读公开仓库不需要任何权限） */
+  githubToken?: string;
+  /**
+   * 单个工具执行的最长看门狗时长（毫秒，默认 600_000 = 10 分钟）。
+   * 长任务（编译 / npm install / 训练）会超过旧的 60s 固定值而被强制中断。
+   */
+  toolWatchdogMs?: number;
 }
 
 /* ------------------------------------------------------------------ */

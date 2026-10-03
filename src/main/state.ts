@@ -17,7 +17,15 @@ const WATCHDOG_MS: Record<AssistantState, number | null> = {
   idle: null,
   listening: 15_000, // 用户一直没说完（比任务书的 10s 稍宽，给长句留余地）
   thinking: 20_000, // 模型思考/首包超时
-  executing: 60_000, // 工具执行（终端命令可能较慢）
+  /**
+   * 工具执行：不再用固定 60s。
+   * 实测问题：编译、npm install、git clone、训练这类命令经常跑几分钟，
+   * 固定 60s 到点会无条件把状态打回 idle，表现为「命令还在跑，助手却说做完了」
+   * 并停止继续下一步 —— 长任务必然断的直接原因。
+   * 现在默认 10 分钟，且可由用户配置（configManager.get().toolWatchdogMs）调整。
+   * 注意：执行中若有工具在运行，extend() 会在每次工具心跳/新工具开始时续期。
+   */
+  executing: 600_000,
   speaking: 60_000, // 播报中；正常由播放结束事件收敛
   error: 5_000, // 瞬态错误自动恢复
 };
@@ -43,6 +51,38 @@ export class StateMachine extends EventEmitter {
   private watchdog: NodeJS.Timeout | null = null;
   /** 致命错误时不自动恢复，需用户手动重试 */
   private fatal = false;
+  /**
+   * executing 态的覆盖时长（毫秒），由 orchestrator 从配置注入。
+   * null/undefined/非正数时回退到 WATCHDOG_MS.executing。
+   */
+  private executingTimeoutOverride: number | null = null;
+
+  /** 设置 executing 态看门狗时长；传 null/非正数恢复默认 10 分钟 */
+  setExecutingTimeout(ms: number | null | undefined): void {
+    if (ms === null || ms === undefined || !Number.isFinite(Number(ms)) || Number(ms) <= 0) {
+      this.executingTimeoutOverride = null;
+    } else {
+      // 下限 30s，避免误配成极小值导致执行态瞬间超时
+      this.executingTimeoutOverride = Math.max(30_000, Math.floor(Number(ms)));
+    }
+    if (this.state === "executing") this.armWatchdog("executing");
+  }
+
+  /**
+   * 续期当前态的看门狗。用于「工具仍在正常产出进展」的场景：
+   * 长命令每产出一段输出就调一次，既不误杀长任务，也保留彻底卡死的兜底。
+   */
+  extend(reason = "工具仍在执行，续期看门狗"): void {
+    if (this.state === "idle") return;
+    this.armWatchdog(this.state);
+    logger.info(`[FSM] 续期 ${this.state} 态看门狗（${reason}）`);
+  }
+
+  /** 当前态生效的看门狗时长（null = 不设超时） */
+  timeoutMsFor(state: AssistantState): number | null {
+    if (state === "executing" && this.executingTimeoutOverride !== null) return this.executingTimeoutOverride;
+    return WATCHDOG_MS[state];
+  }
 
   getState(): AssistantState {
     return this.state;
@@ -114,7 +154,7 @@ export class StateMachine extends EventEmitter {
       clearTimeout(this.watchdog);
       this.watchdog = null;
     }
-    const ms = WATCHDOG_MS[state];
+    const ms = this.timeoutMsFor(state);
     if (ms === null) return;
 
     this.watchdog = setTimeout(() => {

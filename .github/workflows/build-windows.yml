@@ -104,6 +104,19 @@ jobs:
       - name: Verify orb recovery path
         run: node scripts/run.mjs verify-orb
 
+      # 信息简报回归（纯逻辑，不依赖外网；--live 联网检查不在 CI 跑）：
+      # RSS/Atom 与 GitHub Trending 解析、注入过滤、LLM 整理与降级、缓存、
+      # open_path 白名单判断。失败即阻断发布。
+      - name: Verify briefing suite
+        run: node scripts/run.mjs verify-briefing
+
+      # 长任务执行中断专项回归：验证「说一遍就能完整执行」这个用户实测痛点
+      # 的四个根因均已修复（执行态看门狗不再固定 60s、executing 不再被
+      # barge-in 误打断、工具输出掐头去尾保留、response.done 兜底不再
+      # 把 executing 打回 idle）。失败即阻断发布。
+      - name: Verify long-task execution continuity
+        run: node scripts/run.mjs verify-execution
+
       - name: Package Windows installer (NSIS) + update metadata
         run: npm run dist -- --publish never
 

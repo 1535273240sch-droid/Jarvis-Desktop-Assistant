@@ -19,6 +19,11 @@ import { taskRunner } from "./task-runner";
 import { taskArtifacts } from "./task-artifacts";
 import { onEmergencyStopInterrupt } from "./emergency-stop";
 import { isAuthorized } from "./authorization";
+import { briefing } from "./briefing-runtime";
+import { toToolOutput } from "./briefing";
+import type { BriefKind } from "./briefing";
+import { openPathSafe, openSettingsPage, SETTINGS_PAGES } from "./open-things";
+import { wrapUntrusted } from "./prompt-guard";
 import { IPC } from "../common/types";
 import type { AssistantState, SessionStatus, ToolCallView, TaskKind } from "../common/types";
 
@@ -79,7 +84,8 @@ const BUILTIN_TOOLS = [
     function: {
       name: "search_web",
       description:
-        "在浏览器中搜索关键词。用户说「帮我搜一下…」「搜索…」「查一下…（要上网页查的）」时用这个工具。会打开浏览器并显示搜索结果页。",
+        "在浏览器中打开某个关键词的搜索结果页，**只用于用户明确想自己在浏览器里看搜索结果**。注意：本工具不会把页面内容返回给你，你无法据此回答问题。" +
+        "如果用户是想「了解/知道/整理」新闻、热门项目等资讯，请改用 get_briefing；如果用户是要你执行命令或操作文件，请用终端/文件类工具，不要用本工具。",
       parameters: {
         type: "object",
         properties: {
@@ -324,6 +330,69 @@ const BUILTIN_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "get_briefing",
+      description:
+        "获取并整理最新资讯，返回可直接口播的播报稿。用户说「最近有什么新闻」「GitHub 上最近什么项目最火」「科技圈有什么新鲜事」「帮我看看关于XX的新闻」时**必须**用这个工具，" +
+        "不要用 search_web（它只会打开搜索页，你看不到内容）。" +
+        "kind：news=综合新闻；topic_news=某个话题的新闻（必须带 query）；tech_news=科技圈热点（Hacker News）；github_trending=GitHub 热门项目。" +
+        "返回里的【播报稿】是要念给用户的内容：用自然口语播报，不要增删稿中没有的事实，不要念网址；【条目】仅供你在用户说「打开第N个」时对号入座，不要念。" +
+        "播报完用一句话问用户要不要打开其中某一条。若播报稿开头说明了数据来源降级，必须如实念出来。获取失败时如实告知原因，不要编造资讯。",
+      parameters: {
+        type: "object",
+        properties: {
+          kind: { type: "string", enum: ["news", "topic_news", "tech_news", "github_trending"], description: "简报类型" },
+          query: { type: "string", description: "topic_news 的话题关键词，如「新能源汽车」「OpenAI」" },
+          since: { type: "string", enum: ["daily", "weekly", "monthly"], description: "github_trending 的榜单周期，默认 daily（今日）；用户说「本周」「这个月」时改用 weekly / monthly" },
+          language: { type: "string", description: "github_trending 的编程语言过滤，如 python、rust；用户没提就不填" },
+          limit: { type: "number", description: "条数，默认 8，最多 15" },
+          goal: { type: "string", description: "用户的原话" },
+        },
+        required: ["kind"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_briefing_item",
+      description:
+        "打开最近一次简报中的第 N 条（序号从 1 开始）。用户听完简报后说「打开第二个」「把那个 GitHub 项目打开」时调用；后一种说法请根据【条目】列表自行对应出序号。" +
+        "注意：一次只打开一条。用户说「把前三个都打开」时，请依次调用本工具 3 次，不要只调用一次就宣称已全部打开。",
+      parameters: {
+        type: "object",
+        properties: { index: { type: "number", description: "条目序号，从 1 开始" } },
+        required: ["index"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_path",
+      description:
+        "用默认程序打开本机的文件或文件夹（例如「打开下载文件夹」「打开桌面上的那份报告」）。必须是绝对路径且位于工具执行白名单目录内；不确定路径时先用 list_directory 查，不要猜。不能用来启动程序，启动软件请用 open_app。",
+      parameters: {
+        type: "object",
+        properties: { path: { type: "string", description: "文件或文件夹的绝对路径" } },
+        required: ["path"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "open_settings",
+      description: "打开 Windows 设置的某个页面。用户说「打开 WLAN 设置」「调一下声音设置」「看看蓝牙」时调用。",
+      parameters: {
+        type: "object",
+        properties: { page: { type: "string", enum: Object.keys(SETTINGS_PAGES), description: "设置页标识" } },
+        required: ["page"],
+      },
+    },
+  },
 ];
 
 /** WMO 天气代码 -> 中文描述（Open-Meteo 使用 WMO 4677 编码） */
@@ -412,8 +481,33 @@ class Orchestrator {
       const heard = String(partial || "").trim();
       const cur = stateMachine.getState();
       logger.info(`[Orchestrator] 用户打断开始（当前态=${cur}）${heard ? `，已识别："${heard}"` : ""}`);
+
+      /**
+       * 修复：执行中不因 VAD 误判而中断任务。
+       *
+       * 实测问题：执行长命令时（编译 / npm install / git clone）风扇转起来、
+       * 机械盘寻道、显卡负载噪音都会被 server_vad 判成「用户开口」，
+       * 旧实现把 executing 也当作可打断态（见本行历史）：
+       *   if (cur === "speaking" || cur === "thinking" || cur === "executing") interrupt();
+       * 于是工具跑到一半整轮被取消 —— 正是「要我说几遍才行」的主要来源。
+       *
+       * 现在：执行中的语音只更新字幕，**不打断**。用户确实想中止长任务时，
+       * 走已提供的急停 Ctrl+Alt+X（语义明确、不会误触）。
+       */
+      if (cur === "executing") {
+        if (heard) {
+          this.broadcast(IPC.CHAT_MESSAGE, { userTranscriptPartial: heard });
+        }
+        this.broadcast(
+          IPC.CHAT_MESSAGE,
+          { systemNotice: "⏳ 任务执行中，已忽略本次语音以免误中断。需要停止请按 Ctrl+Alt+X。" }
+        );
+        logger.info("[Orchestrator] 执行中忽略 barge-in（防误中断），已更新字幕");
+        return;
+      }
+
       // 只有在"正在说/正在想"时才有东西需要打断；已经在聆听就只更新字幕
-      if (cur === "speaking" || cur === "thinking" || cur === "executing") {
+      if (cur === "speaking" || cur === "thinking") {
         this.interrupt("检测到用户开口（barge-in）");
       }
       if (heard) {
@@ -458,14 +552,26 @@ class Orchestrator {
     });
 
     realtimeClient.on("responseDone", () => {
-      // 播放可能还在排队，等渲染进程的播放结束事件再回 idle；这里作兜底
+      /**
+       * 修复：多命令连续执行时状态被误打回 idle。
+       *
+       * 原实现：response.done 后 400ms 兜底把 speaking/thinking 打回 idle。
+       * 但工具执行完毕时 handleToolCall 切到 thinking（等模型继续），
+       * 这个定时器恰好在此时到点把状态打回 idle —— 连续多条命令时状态机在
+       * idle/executing 之间反复横跳，看起来就是「执行到一半断掉」。
+       *
+       * 现在：执行态绝不被这个兜底逻辑影响；thinking 兜底顺延到 1.2s，
+       * 避免抢在工具结果回注之前收敛。
+       */
       setTimeout(() => {
-        if (stateMachine.getState() === "speaking") {
+        const cur = stateMachine.getState();
+        if (cur === "executing") return; // 工具仍在执行，交给工具自己收敛
+        if (cur === "speaking") {
           stateMachine.transition("idle", "响应结束且播放完成");
-        } else if (stateMachine.getState() === "thinking") {
+        } else if (cur === "thinking") {
           stateMachine.transition("idle", "响应结束（无音频输出）");
         }
-      }, 400);
+      }, 1200);
     });
 
     realtimeClient.on("toolCall", (callId: string, name: string, argsJson: string) => {
@@ -632,6 +738,9 @@ class Orchestrator {
     }
 
     logger.info(`[Orchestrator] 执行工具 ${name} 参数=${JSON.stringify(args).slice(0, 300)}`);
+
+    // 长任务不再被固定 60s 掐断：执行态看门狗取用户配置（默认 10 分钟）
+    stateMachine.setExecutingTimeout(configManager.get().toolWatchdogMs);
     stateMachine.transition("executing", `执行工具 ${name}`);
 
     const view: ToolCallView = { callId, toolName: name, args, status: "executing" };
@@ -641,6 +750,16 @@ class Orchestrator {
     const started = Date.now();
     let output = "";
     let ok = false;
+
+    /**
+     * 心跳：工具还在执行时周期性给看门狗续期。
+     * 「彻底卡死」仍会被兜底回收，而「慢但正常推进」的长任务不会被打断。
+     */
+    const heartbeat = setInterval(() => {
+      if (stateMachine.getState() === "executing") {
+        stateMachine.extend(`工具 ${name} 仍在执行（已 ${Math.round((Date.now() - started) / 1000)}s）`);
+      }
+    }, 30_000);
 
     try {
       // 先看内置工具
@@ -670,6 +789,8 @@ class Orchestrator {
         tool: name,
         context: { args: JSON.stringify(args).slice(0, 500) },
       });
+    } finally {
+      clearInterval(heartbeat);
     }
 
     // 工具失败时也归类记录：这是"指令没做到"最直接的证据来源
@@ -687,8 +808,32 @@ class Orchestrator {
     this.activeToolCalls.delete(callId);
 
     // 结果回注模型，让它继续说话
-    realtimeClient.sendToolResult(callId, output.slice(0, 8000));
+    realtimeClient.sendToolResult(callId, this.fitToolOutputForModel(output));
     stateMachine.transition("thinking", `工具 ${name} 执行完毕，等待模型继续`);
+  }
+
+  /**
+   * 把工具输出裁剪到可回注模型的体积。
+   *
+   * 修复：原来固定 `output.slice(0, 8000)` 单向截断。编译日志 / 批量文件列表
+   * 这类长输出会**静默丢掉尾巴**，模型只看到半截结果就以为「做完了」，
+   * 于是不肯继续下一步 —— 同样是「每次要我说几遍才行」的直接原因。
+   *
+   * 现在改为**掐头去尾保留两端**：错误信息通常在结尾、命令与路径通常在开头，
+   * 两头都保住才能让模型判断任务是否真的完成；并显式告知裁剪了多少，
+   * 避免模型误以为看到的就是全部。
+   */
+  private fitToolOutputForModel(output: string, limit = 12000): string {
+    const text = output ?? "";
+    if (text.length <= limit) return text;
+    const head = Math.floor(limit * 0.6);
+    const tail = limit - head;
+    const omitted = text.length - limit;
+    return (
+      text.slice(0, head) +
+      `\n\n【输出过长，中间 ${omitted} 个字符已省略；命令开头与结尾的错误信息已保留。】\n\n` +
+      text.slice(text.length - tail)
+    );
   }
 
   /**
@@ -951,6 +1096,52 @@ class Orchestrator {
           return { ok: false, output: `查询天气失败（网络或服务不可用）：${(e as Error).message}` };
         }
       }
+
+      case "get_briefing": {
+        if (configManager.get().briefEnabled === false) {
+          return { ok: false, output: "信息简报功能已在设置中关闭，请让用户在设置里开启。" };
+        }
+        const kind = String(args.kind || "") as BriefKind;
+        const since =
+          args.since === "weekly" || args.since === "monthly" ? (args.since as "weekly" | "monthly") : "daily";
+        // 注意：不要在这里 transition("thinking")。thinking 的看门狗只有 20s，而取数+整理最长可能接近 30s；
+        // handleToolCall 已把状态置为 executing（看门狗可配，默认 10 分钟），保持即可。
+        const out = await briefing.run({
+          kind,
+          query: typeof args.query === "string" ? args.query : undefined,
+          since,
+          language: typeof args.language === "string" ? args.language : undefined,
+          limit: Number(args.limit) || undefined,
+          goal: typeof args.goal === "string" ? args.goal : undefined,
+        });
+        safetyManager.audit("briefing_call", {
+          kind,
+          ok: out.ok,
+          usedLlm: out.ok ? out.result.usedLlm : undefined,
+          items: out.ok ? out.result.items.length : 0,
+        });
+        if (!out.ok) {
+          return { ok: false, output: `${out.error} 请如实告诉用户获取失败及原因，不要编造资讯内容。` };
+        }
+        // 完整版（含链接）推到面板；口播稿回注语音模型。外部内容一律包「不可信」边界。
+        this.notifySystem(out.result.display);
+        return { ok: true, output: wrapUntrusted(toToolOutput(out.result), `briefing:${kind}`) };
+      }
+
+      case "open_briefing_item": {
+        const idx = Math.floor(Number(args.index));
+        const it = briefing.getItem(idx);
+        if (!it) {
+          return { ok: false, output: "没有这一条（可能还没做过简报，或序号超出范围）。请如实告诉用户。" };
+        }
+        return this.launchInBrowser(it.url, `打开「${it.title.slice(0, 30)}」`);
+      }
+
+      case "open_path":
+        return openPathSafe(String(args.path || ""), configManager.get().allowedDirectories || []);
+
+      case "open_settings":
+        return openSettingsPage(String(args.page || ""));
 
       case "web_fetch": {
         const urlStr = String(args.url || "").trim();

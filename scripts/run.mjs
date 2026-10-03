@@ -17,6 +17,8 @@ import { fileURLToPath } from "node:url";
  *   node scripts/run.mjs dist       # 构建并打包安装包
  *   node scripts/run.mjs verify-mcp # MCP 协议验证
  *   node scripts/run.mjs verify-orb # 悬浮球恢复链路回归
+ *   node scripts/run.mjs verify-briefing    # 信息简报回归
+ *   node scripts/run.mjs verify-execution  # 长任务执行中断专项回归
  */
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -90,8 +92,16 @@ switch (task) {
     node(resolve(root, "scripts/verify-orb-recovery.mjs"));
     break;
 
+  case "verify-briefing":
+    node(resolve(root, "scripts/verify-briefing.mjs"));
+    break;
+
+  case "verify-execution":
+    node(resolve(root, "scripts/verify-execution.mjs"));
+    break;
+
   default:
     console.log(`未知任务：${task}`);
-    console.log("可用：build | start | selftest | dist | pack | typecheck | verify-mcp | verify-tools | verify-tasks | verify-orb");
+    console.log("可用：build | start | selftest | dist | pack | typecheck | verify-mcp | verify-tools | verify-tasks | verify-orb | verify-briefing | verify-execution");
     process.exit(1);
 }
