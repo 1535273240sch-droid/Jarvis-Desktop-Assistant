@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { userDataDir } from "./user-path";
+import { pruneJsonlFile } from "./log-redact";
 
 /**
  * 日志系统。
@@ -45,17 +46,53 @@ export interface ErrorRecord {
 const MAX_BYTES = 2 * 1024 * 1024; // 单文件 2MB
 const MAX_FILES = 3; // 滚动保留份数
 const THROTTLE_WINDOW_MS = 5000; // 同类消息限流窗口
+/** 限流表条目上限：超过即按 LRU 淘汰，避免高频唯一 key 让 Map 无限增长 */
+const MAX_THROTTLE_ENTRIES = 500;
+/** errors.jsonl 留存清理时保留的最大行数（大小轮转已限制文件体积，这里再兜底） */
+const MAX_ERROR_LINES = 100_000;
+/** 错误日志默认留存天数（未由配置注入时使用） */
+const DEFAULT_RETENTION_DAYS = 30;
 /** 高频噪音：这些子串命中时不写 errors.jsonl（它们是正常/可预期的回执） */
 const NOISE_PATTERNS = [/no ongoing response to cancel/i, /commit when server vad/i, /ongoing response already exists/i];
+
+/**
+ * 归一化限流 key：把消息中每次都会变化的部分替换为占位符，
+ * 让「同类消息」稳定命中同一个 key。
+ *
+ * 顺序很重要：先处理含数字/分隔符的时间戳、UUID、路径，再处理十六进制 ID，
+ * 最后才把裸数字替换掉，避免前一步的占位符被后续规则破坏。
+ */
+function normalizeThrottleKey(raw: string): string {
+  return raw
+    // ISO 时间戳（含毫秒与可选时区）
+    .replace(/\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:[.,]\d+)?(?:Z|[+-]\d{2}:?\d{2})?/g, "<ts>")
+    // UUID
+    .replace(/\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g, "<id>")
+    // 绝对路径：Windows 盘符 / UNC / POSIX
+    .replace(/[A-Za-z]:\\[^\s"']*/g, "<path>")
+    .replace(/\\\\[^\s"']*/g, "<path>")
+    .replace(/\/(?:[\w.-]+\/)+[\w.-]*/g, "<path>")
+    // 十六进制 ID（0x 前缀或 8 位以上纯 hex）
+    .replace(/\b0x[0-9a-fA-F]+\b/g, "<id>")
+    .replace(/\b[0-9a-fA-F]{8,}\b/g, "<id>")
+    // 其余数字串（计数、端口、耗时、递增序号等）
+    .replace(/\d+/g, "<n>");
+}
 
 class Logger {
   private logFilePath: string;
   private errorFilePath: string;
   private logDir: string;
-  /** 限流表：key -> {count, lastTs, suppressed} */
+  /** 限流表：key -> {count, lastTs, suppressed}；按 LRU 淘汰，容量上限见 MAX_THROTTLE_ENTRIES */
   private throttle = new Map<string, { count: number; lastTs: number; suppressed: number }>();
   /** 当前文件已写字节数（避免每次 stat） */
   private writtenBytes = 0;
+  /** errors.jsonl 已写字节数（用于同样的按大小轮转） */
+  private errorWrittenBytes = 0;
+  /** 错误日志留存天数，由 ConfigManager 在加载配置后注入 */
+  private retentionDays = DEFAULT_RETENTION_DAYS;
+  /** errors.jsonl 行缓存：按 mtime+size 失效，避免面板轮询时反复全量同步读取 */
+  private errorCache: { mtimeMs: number; size: number; lines: string[] } | null = null;
 
   constructor() {
     let dir: string;
@@ -73,24 +110,37 @@ class Logger {
     } catch {
       this.writtenBytes = 0;
     }
+    try {
+      this.errorWrittenBytes = fs.existsSync(this.errorFilePath) ? fs.statSync(this.errorFilePath).size : 0;
+    } catch {
+      this.errorWrittenBytes = 0;
+    }
   }
 
-  /** 超限则滚动：jarvis-orb.log -> .1 -> .2 ... */
-  private rotateIfNeeded(nextLen: number): void {
-    if (this.writtenBytes + nextLen <= MAX_BYTES) return;
+  /**
+   * 通用按大小轮转：filePath -> .1 -> .2 ...，返回轮转后应作为起点的已写字节数。
+   * 主日志与 errors.jsonl 共用同一套轮转策略。
+   */
+  private rotateFileIfNeeded(filePath: string, written: number, nextLen: number): number {
+    if (written + nextLen <= MAX_BYTES) return written;
     try {
       for (let i = MAX_FILES - 1; i >= 1; i--) {
-        const from = i === 1 ? this.logFilePath : `${this.logFilePath}.${i - 1}`;
-        const to = `${this.logFilePath}.${i}`;
+        const from = i === 1 ? filePath : `${filePath}.${i - 1}`;
+        const to = `${filePath}.${i}`;
         if (fs.existsSync(from)) {
           if (fs.existsSync(to)) fs.unlinkSync(to);
           fs.renameSync(from, to);
         }
       }
-      this.writtenBytes = 0;
     } catch {
-      this.writtenBytes = 0;
+      /* 轮转失败也不能影响写日志本身 */
     }
+    return 0;
+  }
+
+  /** 超限则滚动：jarvis-orb.log -> .1 -> .2 ... */
+  private rotateIfNeeded(nextLen: number): void {
+    this.writtenBytes = this.rotateFileIfNeeded(this.logFilePath, this.writtenBytes, nextLen);
   }
 
   private write(level: string, message: string, ...args: any[]) {
@@ -105,14 +155,21 @@ class Logger {
     else if (level === "WARN") console.warn(logLine.trimEnd());
     else console.log(logLine.trimEnd());
 
-    // 限流：同类消息在窗口期内只落盘一次
-    const key = `${level}|${message.slice(0, 120)}`;
+    // 限流：同类消息在窗口期内只落盘一次。
+    // key 先做归一化（时间戳/路径/数字/十六进制 ID 等替换为占位符），否则含时间戳或
+    // ID 的高频消息每次 key 都不同，限流形同失效且限流表会无限增长。
+    const key = normalizeThrottleKey(`${level}|${message}`).slice(0, 200);
     const now = Date.now();
     const rec = this.throttle.get(key);
-    if (rec && now - rec.lastTs < THROTTLE_WINDOW_MS) {
-      rec.count += 1;
-      rec.lastTs = now;
-      return; // 抑制写盘
+    if (rec) {
+      // LRU：命中即移到 Map 末尾，保证淘汰的是最久未使用的条目
+      this.throttle.delete(key);
+      this.throttle.set(key, rec);
+      if (now - rec.lastTs < THROTTLE_WINDOW_MS) {
+        rec.count += 1;
+        rec.lastTs = now;
+        return; // 抑制写盘
+      }
     }
     let suffix = "";
     if (rec) {
@@ -121,6 +178,11 @@ class Logger {
       rec.lastTs = now;
     } else {
       this.throttle.set(key, { count: 1, lastTs: now, suppressed: 0 });
+      // 上限 + LRU 淘汰：超过容量时移除最久未使用的条目
+      if (this.throttle.size > MAX_THROTTLE_ENTRIES) {
+        const oldest = this.throttle.keys().next().value;
+        if (oldest !== undefined) this.throttle.delete(oldest);
+      }
     }
 
     const payload = logLine + suffix;
@@ -171,10 +233,33 @@ class Logger {
       tool: opts.tool,
       context: opts.context,
     };
+    const payload = safeStringify(rec) + "\n";
     try {
-      fs.appendFileSync(this.errorFilePath, safeStringify(rec) + "\n", "utf-8");
+      const len = Buffer.byteLength(payload);
+      // 与主日志同一套按大小轮转，避免 errors.jsonl 无限增长
+      this.errorWrittenBytes = this.rotateFileIfNeeded(this.errorFilePath, this.errorWrittenBytes, len);
+      fs.appendFileSync(this.errorFilePath, payload, "utf-8");
+      this.errorWrittenBytes += len;
     } catch (e) {
       console.error("Failed to write error log:", e);
+    }
+  }
+
+  /** 设置日志留存天数（由 ConfigManager 加载配置后注入，避免 logger 反向依赖 config） */
+  setRetentionDays(days: number): void {
+    const n = Math.floor(Number(days));
+    this.retentionDays = Number.isFinite(n) && n > 0 ? n : DEFAULT_RETENTION_DAYS;
+  }
+
+  /** 按留存策略清理 errors.jsonl（启动时调用一次即可） */
+  pruneErrorLog(): { removed: number; kept: number } {
+    try {
+      const r = pruneJsonlFile(this.errorFilePath, { retentionDays: this.retentionDays, maxLines: MAX_ERROR_LINES });
+      this.errorWrittenBytes = fs.existsSync(this.errorFilePath) ? fs.statSync(this.errorFilePath).size : 0;
+      this.errorCache = null;
+      return r;
+    } catch {
+      return { removed: 0, kept: 0 };
     }
   }
 
@@ -190,53 +275,62 @@ class Logger {
     return this.logDir;
   }
 
+  /**
+   * 读取 errors.jsonl 的非空行（带内存缓存）。
+   * 缓存按文件 mtime+size 失效，避免 DIAG_ERRORS 被面板轮询时反复做全量同步 IO。
+   */
+  private readErrorLines(): string[] {
+    try {
+      if (!fs.existsSync(this.errorFilePath)) {
+        this.errorCache = null;
+        return [];
+      }
+      const st = fs.statSync(this.errorFilePath);
+      const cached = this.errorCache;
+      if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) return cached.lines;
+      const lines = fs.readFileSync(this.errorFilePath, "utf-8").split("\n").filter((l) => l.trim().length > 0);
+      this.errorCache = { mtimeMs: st.mtimeMs, size: st.size, lines };
+      return lines;
+    } catch {
+      return [];
+    }
+  }
+
   /** 读取分类错误的聚合统计（供设置面板展示"最近哪类问题最多"） */
   summarizeErrors(limit = 200): Array<{ category: string; source: string; count: number; lastMessage: string; lastTs: string }> {
     const out = new Map<string, { category: string; source: string; count: number; lastMessage: string; lastTs: string }>();
-    try {
-      if (!fs.existsSync(this.errorFilePath)) return [];
-      const lines = fs.readFileSync(this.errorFilePath, "utf-8").trim().split("\n").filter(Boolean);
-      for (const line of lines.slice(-limit)) {
-        let r: ErrorRecord;
-        try {
-          r = JSON.parse(line);
-        } catch {
-          continue;
-        }
-        const key = `${r.category}|${r.source}`;
-        const cur = out.get(key);
-        if (cur) {
-          cur.count += 1;
-          cur.lastMessage = r.message;
-          cur.lastTs = r.ts;
-        } else {
-          out.set(key, { category: r.category, source: r.source, count: 1, lastMessage: r.message, lastTs: r.ts });
-        }
+    for (const line of this.readErrorLines().slice(-limit)) {
+      let r: ErrorRecord;
+      try {
+        r = JSON.parse(line);
+      } catch {
+        continue;
       }
-    } catch {
-      return [];
+      const key = `${r.category}|${r.source}`;
+      const cur = out.get(key);
+      if (cur) {
+        cur.count += 1;
+        cur.lastMessage = r.message;
+        cur.lastTs = r.ts;
+      } else {
+        out.set(key, { category: r.category, source: r.source, count: 1, lastMessage: r.message, lastTs: r.ts });
+      }
     }
     return [...out.values()].sort((a, b) => b.count - a.count);
   }
 
   /** 读取最近的分类错误明细 */
   recentErrors(limit = 50): ErrorRecord[] {
-    try {
-      if (!fs.existsSync(this.errorFilePath)) return [];
-      const lines = fs.readFileSync(this.errorFilePath, "utf-8").trim().split("\n").filter(Boolean);
-      return lines
-        .slice(-limit)
-        .map((l) => {
-          try {
-            return JSON.parse(l) as ErrorRecord;
-          } catch {
-            return null;
-          }
-        })
-        .filter(Boolean) as ErrorRecord[];
-    } catch {
-      return [];
-    }
+    return this.readErrorLines()
+      .slice(-limit)
+      .map((l) => {
+        try {
+          return JSON.parse(l) as ErrorRecord;
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean) as ErrorRecord[];
   }
 
   clearErrors(): void {
@@ -245,6 +339,8 @@ class Logger {
     } catch {
       /* ignore */
     }
+    this.errorWrittenBytes = 0;
+    this.errorCache = null;
   }
 }
 

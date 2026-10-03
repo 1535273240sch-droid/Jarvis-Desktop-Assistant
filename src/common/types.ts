@@ -312,6 +312,16 @@ export interface JarvisConfig {
   briefApiKey?: string;
   /** 新闻 RSS 源，每项一个 URL；空数组 = 使用内置默认 */
   briefNewsFeeds?: string[];
+  /**
+   * 是否启用 WebGPU/GPU 兼容命令行开关（默认 true，保持既有行为）。
+   *
+   * 启用时会追加 enable-unsafe-webgpu / ignore-gpu-blocklist / enable-gpu-rasterization，
+   * 让黑名单驱动也能跑 WebGPU；但这会放大崩溃面。关闭后不再追加这些开关，
+   * 供驱动不稳定、GPU 进程反复崩溃的机器规避。
+   *
+   * 该字段在 app ready 之前同步读取，修改后需重启应用才生效。
+   */
+  gpuCompatFlags?: boolean;
   /** GitHub Token（可选，仅用于提高 Search API 限额，读公开仓库不需要任何权限） */
   githubToken?: string;
   /**

@@ -1,6 +1,9 @@
 /**
  * StepFun 连通性探测：验证 API Key、可用模型、实时语音 WS 握手、视觉接口。
  * Key 从 %APPDATA%\jarvis-desktop-assistant\config.json 读取（不进代码、不进日志）。
+ *
+ * 【手工诊断工具，非 CI 检查】本脚本供人工排查使用，不构成对产品的断言；
+ * 仅在读不到配置时以退出码 1 提前退出，其余情况正常结束（退出码 0）。不要接入 CI。
  */
 import fs from "node:fs";
 import path from "node:path";

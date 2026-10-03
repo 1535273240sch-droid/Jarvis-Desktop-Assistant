@@ -10,6 +10,7 @@ import { mcpClient } from "./mcp";
 import { externalMcp } from "./mcp-external";
 import { visionManager } from "./vision";
 import { desktopController } from "./desktop-control";
+import { buildStartProcessScript } from "./desktop-driver";
 import { safetyManager } from "./safety";
 import { orbController } from "./orb-control";
 import { configManager } from "./config";
@@ -17,7 +18,7 @@ import { memoryStore } from "./memory";
 import { musicStudio } from "./music";
 import { taskRunner } from "./task-runner";
 import { taskArtifacts } from "./task-artifacts";
-import { onEmergencyStopInterrupt } from "./emergency-stop";
+import { onEmergencyStopInterrupt, trigger as triggerEmergencyStop } from "./emergency-stop";
 import { isAuthorized } from "./authorization";
 import { briefing } from "./briefing-runtime";
 import { toToolOutput } from "./briefing";
@@ -432,6 +433,23 @@ function describeWeatherCode(code: unknown): string {
   return map[c] ?? `未知天气(代码${c})`;
 }
 
+/** R-34：执行看门狗心跳周期 */
+const TOOL_HEARTBEAT_MS = 30_000;
+/**
+ * R-34：单个工具调用最多续期多少次。
+ *
+ * 内置/外部 MCP 客户端只返回最终结果、不向本类暴露增量输出，因此无法用「有无新输出」
+ * 判断工具是否真的在推进；这里改用有界续期：20 次 × 30s 后停止续期，交给状态机的
+ * executing 超时正常回收，保证彻底卡死的工具不会被无限续命。
+ */
+const TOOL_MAX_EXTENSIONS = 20;
+
+/**
+ * R-59：执行态下「明确的停止意图」白名单。
+ * 只有命中这些词才允许在执行中打断，避免把环境噪音/普通交谈误判成停止。
+ */
+const STOP_INTENT_RE = /(停止|停下|中断|取消|别做了|不要了|急停|\bstop\b|\bcancel\b|\bhalt\b)/i;
+
 class Orchestrator {
   private panelGetter: (() => BrowserWindow | null) | null = null;
   private started = false;
@@ -495,12 +513,27 @@ class Orchestrator {
        * 走已提供的急停 Ctrl+Alt+X（语义明确、不会误触）。
        */
       if (cur === "executing") {
+        /**
+         * R-59：执行态不再一刀切忽略语音。
+         *
+         * 先对识别文本做明确的停止意图判断（STOP_INTENT_RE 白名单）；命中则复用
+         * 现有的全局急停路径（与 Ctrl+Alt+X 同一套 trigger()）真正中断任务，
+         * 而不是只在 UI 上提示「请按 Ctrl+Alt+X」。未命中才按防误中断逻辑忽略，
+         * 以免环境噪音/普通交谈把长任务打断。
+         */
+        if (heard && STOP_INTENT_RE.test(heard)) {
+          if (heard) this.broadcast(IPC.CHAT_MESSAGE, { userTranscriptPartial: heard });
+          this.broadcast(IPC.CHAT_MESSAGE, { systemNotice: "🛑 收到停止指令，正在中断当前任务。" });
+          logger.warn(`[Orchestrator] 执行中识别到停止意图："${heard}"，触发急停打断`);
+          triggerEmergencyStop(`语音停止意图：${heard}`);
+          return;
+        }
         if (heard) {
           this.broadcast(IPC.CHAT_MESSAGE, { userTranscriptPartial: heard });
         }
         this.broadcast(
           IPC.CHAT_MESSAGE,
-          { systemNotice: "⏳ 任务执行中，已忽略本次语音以免误中断。需要停止请按 Ctrl+Alt+X。" }
+          { systemNotice: "⏳ 任务执行中，已忽略本次语音以免误中断。需要停止请说「停下」，或按 Ctrl+Alt+X。" }
         );
         logger.info("[Orchestrator] 执行中忽略 barge-in（防误中断），已更新字幕");
         return;
@@ -752,14 +785,34 @@ class Orchestrator {
     let ok = false;
 
     /**
-     * 心跳：工具还在执行时周期性给看门狗续期。
-     * 「彻底卡死」仍会被兜底回收，而「慢但正常推进」的长任务不会被打断。
+     * R-34：心跳不再「只要在 executing 就无条件续期」。
+     *
+     * 旧实现每 30s 无脑 extend()，只要工具 Promise 永不 settle，看门狗就被无限续期，
+     * state.ts 里 executing 的 600s 上限形同虚设。
+     *
+     * 现在改为有界续期：最多续期 TOOL_MAX_EXTENSIONS 次（20 × 30s = 600s），之后停止
+     * extend()，让状态机的 executing 超时正常回收。正常长任务在续期窗口内持续续期不会
+     * 被误杀；彻底卡死的工具最迟在续期窗口结束后被回收，不再永久挂起。
      */
+    let extensions = 0;
+    let capLogged = false;
+
     const heartbeat = setInterval(() => {
-      if (stateMachine.getState() === "executing") {
-        stateMachine.extend(`工具 ${name} 仍在执行（已 ${Math.round((Date.now() - started) / 1000)}s）`);
+      if (stateMachine.getState() !== "executing") return;
+      if (extensions >= TOOL_MAX_EXTENSIONS) {
+        if (!capLogged) {
+          capLogged = true;
+          logger.warn(
+            `[Orchestrator] 工具 ${name} 已达续期上限 ${TOOL_MAX_EXTENSIONS} 次，停止续期看门狗，等待状态机超时回收`
+          );
+        }
+        return;
       }
-    }, 30_000);
+      extensions += 1;
+      stateMachine.extend(
+        `工具 ${name} 仍在执行（已 ${Math.round((Date.now() - started) / 1000)}s，续期 ${extensions}/${TOOL_MAX_EXTENSIONS}）`
+      );
+    }, TOOL_HEARTBEAT_MS);
 
     try {
       // 先看内置工具
@@ -849,8 +902,21 @@ class Orchestrator {
         if (!q) return { ok: false, output: "没有指定要打开的软件名。" };
         const extraArgs = typeof args.args === "string" ? args.args.trim() : "";
 
-        const candidates = await appCatalog.resolve(q);
-        if (!candidates.length) {
+        // R-25：只有 score >= 80 的高置信候选才允许直接启动；40~79 分交回模型澄清，
+        // 避免「同名即匹配」把用户带进错误的程序。
+        const { confident, uncertain } = await appCatalog.resolveCandidates(q);
+        if (!confident.length) {
+          if (uncertain.length) {
+            const near = uncertain.slice(0, 5).map((a) => `${a.name}（匹配度 ${a.score}）`).join("、");
+            safetyManager.audit("open_app_ambiguous", {
+              query: q,
+              candidates: uncertain.slice(0, 5).map((a) => a.name),
+            });
+            return {
+              ok: false,
+              output: `「${q}」的匹配不够确定，可能是：${near}。请向用户确认要打开哪一个，确认后再用准确名称重试；不要猜测。`,
+            };
+          }
           // 列出本机可用的程序，帮助模型换一个说法重试（而不是去点图标）
           const all = await appCatalog.scan();
           const sample = all.slice(0, 25).map((a) => a.name).join("、");
@@ -861,6 +927,7 @@ class Orchestrator {
           };
         }
 
+        const candidates = confident;
         const pick = candidates[0];
         stateMachine.transition("executing", `正在启动 ${pick.name}`);
         const launched = await this.launchApp(pick, extraArgs);
@@ -997,6 +1064,8 @@ class Orchestrator {
         const win = await visionManager.getActiveWindow();
         if (!win) return { ok: false, output: "当前没有可操作的前台窗口（焦点可能在桌面）。" };
         const cfgClose = configManager.get();
+        // R-27：记录真实审批路径，不再无条件写 confirmed: true
+        let approvalPath: "user_confirmed" | "auto_approved" = "auto_approved";
         if (cfgClose.confirmHighRisk) {
           const confirmed = await safetyManager.requestConfirmation({
             requestId: `cfm_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6)}`,
@@ -1007,11 +1076,17 @@ class Orchestrator {
             explanation: `将关闭当前前台窗口「${win.title}」（进程 ${win.processName}）。未保存的内容可能丢失，请确认。`,
           });
           if (!confirmed) return { ok: false, output: "用户拒绝了关闭窗口的操作。" };
+          approvalPath = "user_confirmed";
         } else {
           safetyManager.audit("auto_approved", { action: "close_current_window", title: win.title });
         }
         const msg = await desktopController.pressKeys("alt+f4");
-        safetyManager.audit("close_current_window", { title: win.title, processName: win.processName, confirmed: true });
+        safetyManager.audit("close_current_window", {
+          title: win.title,
+          processName: win.processName,
+          confirmed: approvalPath === "user_confirmed",
+          approvalPath,
+        });
         return { ok: !msg.includes("拒绝"), output: `已请求关闭窗口「${win.title}」：${msg}` };
       }
 
@@ -1378,18 +1453,14 @@ class Orchestrator {
     app: { name: string; launchPath: string; kind: "exe" | "lnk" | "path" },
     extraArgs = ""
   ): Promise<{ ok: boolean; error?: string }> {
-    const esc = (s: string) => String(s).replace(/'/g, "''");
-    let script: string;
-
-    if (app.kind === "path") {
-      // 只是 PATH 里的名字，交给 cmd 的 start（本机 start 归一化会保证 shell=cmd）
-      script = `Start-Process -FilePath '${esc(app.launchPath)}'${extraArgs ? ` -ArgumentList '${esc(extraArgs)}'` : ""} -ErrorAction Stop; 'ok'`;
-    } else {
-      script =
-        `$p = Start-Process -FilePath '${esc(app.launchPath)}'` +
-        (extraArgs ? ` -ArgumentList '${esc(extraArgs)}'` : "") +
-        ` -PassThru -ErrorAction Stop; if ($p) { 'ok pid=' + $p.Id } else { 'ok' }`;
-    }
+    // R-55：与 desktop-driver 共用同一份 Start-Process 构造（原行为不变）
+    const script = buildStartProcessScript({
+      launchPath: app.launchPath,
+      args: extraArgs,
+      kind: app.kind,
+      okExpr: "'ok pid=' + $p.Id",
+      goneExpr: "'ok'",
+    });
 
     try {
       const out = await this.ps(script, 20000);

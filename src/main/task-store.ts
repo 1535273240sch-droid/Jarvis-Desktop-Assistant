@@ -48,7 +48,10 @@ class TaskStore {
       const dir = path.dirname(this.filePath);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       const tmp = this.filePath + ".tmp";
-      // 只保留最近 50 个任务，避免无限增长
+      // 只保留最近 50 个任务，避免无限增长。
+      // 注意：这里只裁剪**持久化**内容，不删产物目录——被裁掉的任务仍在内存与面板中
+      // 可见，删掉产物会让用户点开时「读取产物失败」。产物由启动时的
+      // pruneTaskArtifacts() 按保留期清理。
       const trimmed = [...tasks].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 50);
       fs.writeFileSync(tmp, JSON.stringify(trimmed, null, 2), "utf-8");
       fs.renameSync(tmp, this.filePath);

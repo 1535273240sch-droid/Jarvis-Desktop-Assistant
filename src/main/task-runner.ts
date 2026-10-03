@@ -2,10 +2,10 @@ import { EventEmitter } from "node:events";
 import type { BrowserWindow } from "electron";
 import { logger } from "./logger";
 import { safetyManager } from "./safety";
-import { configManager } from "./config";
 import { isStopped, onStop } from "./emergency-stop";
 import { taskStore } from "./task-store";
-import { taskArtifacts } from "./task-artifacts";
+import { taskArtifacts, pruneTaskArtifacts } from "./task-artifacts";
+import { configManager } from "./config";
 import { desktopDriver } from "./desktop-driver";
 import type { WindowInfo } from "./desktop-driver";
 import { pickAgentProfile, profileConfigured } from "./app-profiles";
@@ -73,6 +73,12 @@ class TaskRunner extends EventEmitter {
     const resumed = restored.filter((t) => t.status === "waiting_user");
     if (resumed.length) {
       logger.info(`[TaskRunner] 恢复了 ${resumed.length} 个未完成任务（全部为已暂停，等待用户处理）`);
+    }
+    // 启动时按保留期清理旧任务产物（复用 config.logRetentionDays，默认 30 天）
+    try {
+      pruneTaskArtifacts(configManager.get().logRetentionDays ?? 30);
+    } catch (e) {
+      logger.warn("[TaskRunner] 任务产物保留期清理失败:", e);
     }
     // 急停：取消队列与等待（与语音打断分开；急停处理器彼此独立）
     onStop((reason) => this.cancelAll(reason));
@@ -723,7 +729,7 @@ class TaskRunner extends EventEmitter {
 
     // 步骤 4：轮询进度（分段等待，不靠一次阻塞调用）
     let finalSnapshot = "";
-    await this.runStep(task, 3, "轮询观察进度直至完成", async (step) => {
+    await this.runStep(task, 3, "轮询观察进度直至完成", async (_step) => {
       const p = profile as AppProfile;
       const intervalMs = 15_000;
       const maxPolls = 80; // 80 * 15s = 20 分钟
@@ -758,7 +764,7 @@ class TaskRunner extends EventEmitter {
     });
 
     // 步骤 5：读取报告并保存
-    await this.runStep(task, 4, "读取报告并保存产物", async (step) => {
+    await this.runStep(task, 4, "读取报告并保存产物", async (_step) => {
       const p = profile as AppProfile;
       let report = "";
       if (finalSnapshot) {
@@ -836,7 +842,7 @@ class TaskRunner extends EventEmitter {
     });
 
     // 步骤 3：草稿确认（终点即 Jarvis 面板；确认后仍由用户手动发送）
-    await this.runStep(task, 2, "生成草稿并等待用户确认", async (step) => {
+    await this.runStep(task, 2, "生成草稿并等待用户确认", async (_step) => {
       // 断点恢复时从参数重建（buildDraft 确定性），避免恢复后草稿数据缺失
       const rebuilt = buildDraft({ contact, text, images });
       const d = (draft as WechatDraftPayload | null) ?? rebuilt.payload;

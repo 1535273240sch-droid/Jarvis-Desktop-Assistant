@@ -221,7 +221,8 @@ class ExternalMcpManager extends EventEmitter {
         const attempts = (this.respawnAttempts.get(cfg.name) || 0) + 1;
         this.scheduleRespawn(cfg, attempts);
       }
-    });    rt.proc.on("error", (err) => {
+    });
+    rt.proc.on("error", (err) => {
       rt.lastError = err.message;
       logger.errorCategorized("tool_unavailable", "ExtMCP", `外部 MCP「${cfg.name}」进程错误：${err.message}`, {
         handled: true,

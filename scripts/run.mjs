@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
  *   node scripts/run.mjs verify-orb # 悬浮球恢复链路回归
  *   node scripts/run.mjs verify-briefing    # 信息简报回归
  *   node scripts/run.mjs verify-execution  # 长任务执行中断专项回归
+ *   node scripts/run.mjs verify-app-e2e    # 应用内真实端到端联调（需 Electron + 网络）
  */
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -100,8 +101,13 @@ switch (task) {
     node(resolve(root, "scripts/verify-execution.mjs"));
     break;
 
+  case "verify-app-e2e":
+    // R-49：把应用内真实端到端联调接入统一入口（此前脚本存在但无任何入口调用）。
+    node(resolve(root, "scripts/verify-app-e2e.mjs"));
+    break;
+
   default:
     console.log(`未知任务：${task}`);
-    console.log("可用：build | start | selftest | dist | pack | typecheck | verify-mcp | verify-tools | verify-tasks | verify-orb | verify-briefing | verify-execution");
+    console.log("可用：build | start | selftest | dist | pack | typecheck | verify-mcp | verify-tools | verify-tasks | verify-orb | verify-briefing | verify-execution | verify-app-e2e");
     process.exit(1);
 }

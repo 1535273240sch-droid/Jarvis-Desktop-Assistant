@@ -134,10 +134,18 @@ c2.on("response.done", (m) => {
   if (m.response?.status === "cancelled") cancelled = true;
 });
 const bytesAtCancel = bytesBefore;
-c2.send({ type: "response.cancel" });
+// R-45：原实现 `ok(true, ...)` 是字面恒真断言，发送失败也会显示通过。
+// 这里把 send 包进 try/catch，用「是否真的抛出异常」作为断言结果。
+let cancelError = null;
+try {
+  c2.send({ type: "response.cancel" });
+} catch (e) {
+  cancelError = e;
+}
 await new Promise((r) => setTimeout(r, 3000));
 const bytesAfterCancel = bytesBefore;
-ok(true, "已发送 response.cancel（无异常抛出）");
+ok(cancelError === null, "已发送 response.cancel（无异常抛出）",
+  cancelError ? `抛出：${cancelError.message || cancelError}` : "");
 const delta = bytesAfterCancel - bytesAtCancel;
 console.log(`  取消前 ${bytesAtCancel} 字节 -> 取消后 ${bytesAfterCancel} 字节（增量 ${delta}）`);
 // 实测：取消后音频立即停止流入（增量≈0）。服务端不一定回传 status:"cancelled"，

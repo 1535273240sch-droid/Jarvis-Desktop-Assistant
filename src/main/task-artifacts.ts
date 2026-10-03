@@ -40,6 +40,51 @@ function safeName(name: string): string {
   return n || "artifact.txt";
 }
 
+/**
+ * 按保留期清理旧产物（默认复用 config.logRetentionDays）。
+ * 以任务目录内最新文件的 mtime 作为「最近使用时间」，早于 cutoff 的整目录删除；
+ * 目录名严格限定为白名单字符，避免误删 artifactsRoot 下的意外条目。
+ */
+export function pruneTaskArtifacts(retentionDays: number): { removed: number; kept: number } {
+  const days = Math.max(1, Math.floor(Number(retentionDays) || 30));
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const root = artifactsRoot();
+  let removed = 0;
+  let kept = 0;
+  try {
+    if (!fs.existsSync(root)) return { removed: 0, kept: 0 };
+    for (const name of fs.readdirSync(root)) {
+      if (!/^[A-Za-z0-9_-]+$/.test(name)) continue;
+      const dir = path.join(root, name);
+      try {
+        const st = fs.statSync(dir);
+        if (!st.isDirectory()) continue;
+        let newest = st.mtimeMs;
+        for (const f of fs.readdirSync(dir)) {
+          try {
+            const fm = fs.statSync(path.join(dir, f)).mtimeMs;
+            if (fm > newest) newest = fm;
+          } catch {
+            /* 单个文件不可读时忽略 */
+          }
+        }
+        if (newest < cutoff) {
+          fs.rmSync(dir, { recursive: true, force: true });
+          removed += 1;
+        } else {
+          kept += 1;
+        }
+      } catch {
+        /* 单个目录处理失败不影响其余 */
+      }
+    }
+  } catch (e) {
+    logger.warn("[Artifacts] 产物保留期清理失败:", e);
+  }
+  if (removed) logger.info(`[Artifacts] 按保留期（${days} 天）清理任务产物目录 ${removed} 个`);
+  return { removed, kept };
+}
+
 export const taskArtifacts = {
   /** 保存一份文本产物（自动加元信息头），返回相对文件名 */
   saveText(taskId: string, fileName: string, title: string, content: string, source?: string): string {

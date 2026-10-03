@@ -6,7 +6,6 @@ import { configManager } from "./config";
 import { safetyManager } from "./safety";
 import { isStopped, onStop } from "./emergency-stop";
 import { sanitizeToolOutput } from "./prompt-guard";
-import { IPC } from "../common/types";
 import type { SecurityConfirmRequest } from "../common/types";
 
 /**
@@ -64,10 +63,11 @@ export class McpClient extends EventEmitter {
   private stdoutBuffer = "";
   private tools: McpTool[] = [];
   private initialized = false;
-  private serverPkgPath = "";
   // [supervisor patch] 崩溃自动重启的退避状态
   private restartAttempts = 0;
   private restartTimer: NodeJS.Timeout | null = null;
+  // [R-30] 目录白名单下发失败后的失败关闭标记：抑制自动重启，避免反复拉起不受白名单约束的子进程
+  private failClosed = false;
 
   isReady(): boolean {
     return this.initialized && this.proc !== null && !this.proc.killed;
@@ -75,23 +75,31 @@ export class McpClient extends EventEmitter {
 
   /** [supervisor patch] 内置 MCP 崩溃自动重启：指数退避 2s/4s/8s/…/30s */
   private scheduleMcpRestart(attempts: number): void {
+    // R-30：目录白名单下发失败触发的失败关闭是有意终止，不得再自动重启
+    //（否则会形成 spawn → 握手 → 下发失败 → kill 的无限循环）。
+    if (this.failClosed) return;
     this.restartAttempts = attempts;
     if (this.restartTimer) clearTimeout(this.restartTimer);
     const delayMs = Math.min(30000, 2000 * Math.pow(2, Math.max(0, attempts - 1)));
     logger.info(`[MCP Supervisor] 将在 ${delayMs}ms 后自动重启内置 MCP（第 ${attempts} 次）`);
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
+      if (this.failClosed) return;
       if (this.proc || this.isReady()) return;
       this.start()
         .then((r) => {
           if (r.ok) {
             logger.info("[MCP Supervisor] 内置 MCP 已自动重启");
+          } else if (this.failClosed) {
+            logger.warn(`[MCP Supervisor] 因目录白名单下发失败而失败关闭，停止自动重试：${r.reason}`);
           } else {
             logger.warn(`[MCP Supervisor] 重启未成功：${r.reason}（继续退避重试）`);
             this.scheduleMcpRestart(attempts + 1);
           }
         })
-        .catch(() => this.scheduleMcpRestart(attempts + 1));
+        .catch(() => {
+          if (!this.failClosed) this.scheduleMcpRestart(attempts + 1);
+        });
     }, delayMs);
   }
 
@@ -155,7 +163,6 @@ export class McpClient extends EventEmitter {
       this.emit("unavailable", reason);
       return { ok: false, reason };
     }
-    this.serverPkgPath = entry;
 
     try {
       this.proc = spawn(process.execPath, [entry], {
@@ -198,6 +205,8 @@ export class McpClient extends EventEmitter {
     });
     this.proc.on("exit", (code, signal) => {
       logger.warn(`[MCP] 子进程退出 code=${code} signal=${signal}`);
+      const wasFailClosed = this.failClosed;
+      this.failClosed = false;
       this.initialized = false;
       this.proc = null;
       for (const [, p] of this.pending) {
@@ -206,6 +215,11 @@ export class McpClient extends EventEmitter {
       }
       this.pending.clear();
       this.emit("exited", { code, signal });
+      // [R-30] 失败关闭是有意终止，不触发崩溃自动重启
+      if (wasFailClosed) {
+        logger.warn("[MCP] 因目录白名单下发失败而失败关闭，不自动重启");
+        return;
+      }
       // [supervisor patch] 崩溃自动重启；应用退出随进程消亡，无需停止路径
       if (!configManager.get().mcpEnabled) return;
       this.scheduleMcpRestart(this.restartAttempts + 1);
@@ -239,7 +253,23 @@ export class McpClient extends EventEmitter {
     // 而其语义是「空数组 = 整个文件系统可访问」（详见其 set_config_value 说明）。
     // 也就是说，光在 Jarvis 面板里填白名单只挡住了安全模块自己的判断，
     // 子进程侧依然可以读写任意路径 —— 白名单形同虚设。
-    await this.applyAllowedDirectories();
+    //
+    // 失败关闭（R-30）：下发失败时子进程仍保持默认的「全盘可访问」，此时绝不能继续
+    // 把 read_file/write_file/move_file 等工具暴露给模型。因此终止子进程、清空工具、
+    // 把本次启动标记为失败返回。
+    const applied = await this.applyAllowedDirectories();
+    if (!applied.ok) {
+      const reason = `目录白名单下发失败，内置 MCP 已失败关闭：${applied.reason}`;
+      logger.error(`[MCP] ${reason}`);
+      this.failClosed = true;
+      this.tools = [];
+      this.emit("tools", this.tools);
+      this.stop();
+      this.emit("unavailable", reason);
+      return { ok: false, reason };
+    }
+    // 白名单下发成功：清除失败关闭标志，恢复正常状态与崩溃自动重启能力。
+    this.failClosed = false;
 
     // 工具发现
     try {
@@ -264,9 +294,9 @@ export class McpClient extends EventEmitter {
    * —— 这里下发的是用户自己在设置面板里填写的白名单，不是模型提出的请求。
    * 白名单为空时不下发（安全模块已在此之前拒绝启动 MCP）。
    */
-  private async applyAllowedDirectories(): Promise<void> {
+  private async applyAllowedDirectories(): Promise<{ ok: boolean; reason?: string }> {
     const dirs = configManager.get().allowedDirectories || [];
-    if (!dirs.length) return;
+    if (!dirs.length) return { ok: true };
     try {
       const res = await this.rpc("tools/call", {
         name: "set_config_value",
@@ -276,12 +306,15 @@ export class McpClient extends EventEmitter {
         const detail = res.error?.message || JSON.stringify(res.result).slice(0, 200);
         logger.warn(`[MCP] 下发目录白名单失败（文件操作可能不受白名单约束）：${detail}`);
         this.emit("unavailable", `目录白名单下发失败：${detail}`);
-        return;
+        return { ok: false, reason: detail };
       }
       logger.info(`[MCP] 已下发目录白名单（${dirs.length} 个）：${dirs.join(" | ")}`);
       safetyManager.audit("mcp_allowed_dirs_applied", { count: dirs.length, dirs });
+      return { ok: true };
     } catch (e) {
-      logger.warn("[MCP] 下发目录白名单异常:", (e as Error).message);
+      const detail = (e as Error).message;
+      logger.warn("[MCP] 下发目录白名单异常:", detail);
+      return { ok: false, reason: detail };
     }
   }
 

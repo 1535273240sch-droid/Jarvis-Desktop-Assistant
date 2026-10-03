@@ -126,7 +126,9 @@ fn ribbon_vs_main(
   let twist = theta * (0.72 + u.ribbonTwist * 0.58)
               + phase * 0.74 + layer * 1.17;
   let ribbonDirection = normalize(side * cos(twist) + surfaceNormal * sin(twist));
-  let widthEnvelope = (0.72 + 0.28 * pow(sin(theta * 1.5 + phase + layer), 2.0))
+  // R-64: 先取 sin 再自乘，避免 pow 对可能为负的底数产生未定义结果（WGSL 下可能 NaN）
+  let s0 = sin(theta * 1.5 + phase + layer);
+  let widthEnvelope = (0.72 + 0.28 * s0 * s0)
                       * mix(0.42, 1.0, sqrt(max(arcEnvelope, 0.0)));
   var position = center + ribbonDirection * strip * u.ribbonWidth * 0.5 * widthEnvelope;
 

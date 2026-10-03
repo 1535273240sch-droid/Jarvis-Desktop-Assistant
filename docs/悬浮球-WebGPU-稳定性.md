@@ -1,6 +1,6 @@
 # 悬浮球 WebGPU 稳定性
 
-悬浮球是 WebGPU（WGSL）流体玻璃球。本文汇总它在 v1.4.29（提交 a0eba09，2026-09-28）下的状态、多主题与音频动态、设备丢失自愈、WebGPU 自检隔离、构建三层同步与回归测试。
+悬浮球是 WebGPU（WGSL）流体玻璃球。本文汇总它在 v1.5.37（main 分支，见仓库 tag）下的状态、多主题与音频动态、设备丢失自愈、WebGPU 自检隔离、构建三层同步与回归测试。
 
 > 本文合并自 `docs/TODO-ORB-WEBGPU.md`、`docs/ORB-WEBGPU-RECOVERY.md`、`docs/ORB_CHANGES.md` 三份旧文档；**那三份已删除**，旧链接请一律改指本文。
 
@@ -146,7 +146,7 @@ scripts/generate-orb.mjs         ──┴─► src/renderer/orb.html（构建�
 
 ## 九、回归测试
 
-`npm run verify:orb`（脚本 `scripts/verify-orb-recovery.mjs`，零依赖纯 Node ESM，不启动 Electron、不需要 WebGPU），共 **33 项**，覆盖：
+`npm run verify:orb`（脚本 `scripts/verify-orb-recovery.mjs`，零依赖纯 Node ESM，不启动 Electron、不需要 WebGPU），共 **41 项静态断言**（以脚本实际输出为准），覆盖：
 
 - 旧终态缺陷防回归（不得再出现终态 `fail(`，须保留重建标记与 `.lost.then` 绑定）；
 - 退避序列复算（500/1000/2000/4000/8000ms，合计 15.5s）；

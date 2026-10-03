@@ -269,8 +269,15 @@ console.log("\n=== 5. MCP 工具执行闭环 ===");
   check(/not allowed|Path not allowed/i.test(textOf(outside)), "白名单外被拒绝（安全闸门生效）", textOf(outside).replace(/\s+/g, " ").slice(0, 120));
 
   // 用户真实场景：打开计算器
-  const sp = await rpc("tools/call", { name: "start_process", arguments: { command: "calc.exe", timeout_ms: 5000 } }, 60000);
-  checkEnv(/Process started with PID/i.test(textOf(sp)), "start_process 能启动程序", textOf(sp).replace(/\s+/g, " ").slice(0, 80));
+  // R-48：这是生产 MCP `start_process` 的核心契约（spawn 出进程并回 PID），
+  // 不依赖 GUI 会话（只断言进程被拉起，不观测窗口），故改为 check —— CI 上失败也必须失败。
+  // 进程拉起受调度抖动影响，首次失败时重试一次（不改变「必须成功」的语义）。
+  let sp = await rpc("tools/call", { name: "start_process", arguments: { command: "calc.exe", timeout_ms: 5000 } }, 60000);
+  if (!/Process started with PID/i.test(textOf(sp))) {
+    await new Promise((r) => setTimeout(r, 1500));
+    sp = await rpc("tools/call", { name: "start_process", arguments: { command: "calc.exe", timeout_ms: 5000 } }, 60000);
+  }
+  check(/Process started with PID/i.test(textOf(sp)), "start_process 能启动程序", textOf(sp).replace(/\s+/g, " ").slice(0, 80));
 
   // 用户真实场景：start 内建命令（此前偶发失败）
   const sp2 = await rpc("tools/call", { name: "start_process", arguments: { command: "start notepad", timeout_ms: 5000 } }, 60000);

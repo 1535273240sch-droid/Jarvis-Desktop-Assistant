@@ -81,6 +81,21 @@ const init = await rpc("initialize", {
 check(!init.error, "initialize 成功", init.error ? init.error.message : `server=${init.result?.serverInfo?.name} v${init.result?.serverInfo?.version}`);
 notify("notifications/initialized", {});
 
+// 本脚本直接拉起 desktop-commander，必须显式下发 allowedDirectories：
+// 它的默认配置不含临时目录，不配置的话下面 list_directory/read_file 会被
+// 「Path not allowed」拒绝（历史遗漏，脚本头部却声称"已配置白名单"）。
+console.log("\n=== 1b. 下发白名单目录 ===");
+const setRes = await rpc(
+  "tools/call",
+  { name: "set_config_value", arguments: { key: "allowedDirectories", value: [workDir] } },
+  40000,
+);
+check(
+  !setRes.error && !setRes.result?.isError,
+  "白名单目录下发成功",
+  setRes.error ? setRes.error.message : String(setRes.result?.content?.[0]?.text || "").slice(0, 80),
+);
+
 console.log("\n=== 2. tools/list 工具发现 ===");
 const list = await rpc("tools/list", {});
 const tools = list.result?.tools || [];
@@ -117,4 +132,7 @@ if (rd.error) {
 
 console.log(`\n=== MCP 验证结果：通过 ${pass}，失败 ${fail} ===`);
 proc.kill();
+// R-66：清理临时目录，避免 os.tmpdir()/jarvis-mcp-probe 长期残留
+//（与 verify-tools.mjs 的 .tmp-regression 清理保持一致）。
+try { fs.rmSync(workDir, { recursive: true, force: true }); } catch { /* ignore */ }
 setTimeout(() => process.exit(fail === 0 ? 0 : 1), 300);

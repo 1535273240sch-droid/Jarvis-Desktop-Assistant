@@ -25,10 +25,22 @@ const require = createRequire(import.meta.url);
 
 let pass = 0;
 let fail = 0;
+let uncovered = 0;
 const failures = [];
+const uncoveredItems = [];
 function check(ok, label, extra = "") {
   if (ok) { pass++; console.log(`  [OK]   ${label}${extra ? " | " + extra : ""}`); }
   else { fail++; failures.push(label); console.log(`  [FAIL] ${label}${extra ? " | " + extra : ""}`); }
+}
+/**
+ * 显式声明「本项未被覆盖」：既不计入通过，也不计入失败。
+ * 用于「想在 CI 验证但当前无法真正调用生产代码」的条目 —— 与其用重写/正则冒充
+ * 行为验证让通过数虚高，不如把它明确标出来，避免回归失去拦截能力还看不出来。
+ */
+function markUncovered(label, reason = "") {
+  uncovered++;
+  uncoveredItems.push(label);
+  console.log(`  [UNCOVERED] ${label}${reason ? " | " + reason : ""}`);
 }
 
 // state.ts 顶层 import 了 logger（会写文件），这里打桩避免污染用户目录
@@ -73,22 +85,57 @@ console.log("== 1. 执行态看门狗（长任务不再被 60s 掐断）==");
 /* ============ 2. extend() 续期 ============ */
 console.log("\n== 2. 工具执行心跳续期（慢但正常推进不被误杀）==");
 {
-  // 验证「续期」语义。setExecutingTimeout 有 30s 下限，无法用亚秒值驱动超时，
-  // 因此这里用真实时钟验证「续期会重新计时」，超时回收则交给源码级断言。
-  const m = new StateMachine();
-  m.setExecutingTimeout(30_000);
-  m.transition("executing", "模拟长任务");
-  await new Promise((r) => setTimeout(r, 50));
-  const t0 = Date.now();
-  m.extend("工具仍在执行");
-  check(m.getState() === "executing", "执行中调用 extend 不会改变状态");
-  // 连续 3 次续期后仍应保持 executing（若续期失效，30s 后才会回退，这里不会）
-  for (let i = 0; i < 3; i++) {
-    await new Promise((r) => setTimeout(r, 40));
-    m.extend("仍在执行");
+  // R-47：原断言只验证「extend 不改变状态」——extend 退化成空函数也能通过。
+  // 现注入可控时钟（fake timer）验证「续期确实推迟了回收时刻」：
+  // armWatchdog 在调用时才解析全局 setTimeout/clearTimeout，所以在测试内替换全局
+  // 实现即可观测到 extend 是否真的「清旧定时器 + 建新定时器 + 截止时间后移」。
+  // 覆盖边界：证明的是看门狗被重建且新定时器可触发；不验证真实 30s 的等待时长。
+  const realSetTimeout = globalThis.setTimeout;
+  const realClearTimeout = globalThis.clearTimeout;
+  let fakeNow = 0;
+  let timerSeq = 0;
+  const armed = [];
+  const cleared = [];
+  globalThis.setTimeout = (fn, delay, ...args) => {
+    const handle = {
+      __fakeTimer: true, id: ++timerSeq, fn, args,
+      delay: Number(delay) || 0, dueAt: fakeNow + (Number(delay) || 0),
+    };
+    armed.push(handle);
+    return handle;
+  };
+  globalThis.clearTimeout = (h) => { if (h && h.__fakeTimer) cleared.push(h.id); };
+
+  try {
+    const m = new StateMachine();
+    m.setExecutingTimeout(30_000);
+    m.transition("executing", "模拟长任务");
+    const first = armed[armed.length - 1];
+    check(Boolean(first) && first.delay === 30_000,
+      "进入 executing 时按配置武装看门狗", first ? `${first.delay}ms` : "未武装");
+
+    fakeNow = 5_000; // 时钟前进 5s，但不触发定时器
+    m.extend("工具仍在执行");
+    const second = armed[armed.length - 1];
+    check(m.getState() === "executing", "执行中调用 extend 不会改变状态");
+    check(Boolean(first) && cleared.includes(first.id),
+      "extend 清除了旧的看门狗定时器", first ? `cleared=[${cleared.join(",")}]` : "");
+    check(Boolean(first) && Boolean(second) && second.id !== first.id,
+      "extend 重建看门狗定时器（句柄发生变化）",
+      first && second ? `#${first.id} -> #${second.id}` : "");
+    check(Boolean(first) && Boolean(second) && second.dueAt > first.dueAt,
+      "extend 推迟了回收时刻（截止时间后移）",
+      first && second ? `${first.dueAt}ms -> ${second.dueAt}ms` : "");
+
+    // 新定时器必须是「活」的：手动触发它应真的把 executing 回退到 idle，
+    // 证明 extend 武装的不是空壳（否则上面「重建句柄」也可能只是记账）。
+    if (second && typeof second.fn === "function") second.fn();
+    check(m.getState() === "idle", "新看门狗可被触发并回退状态（续期武装的是真实定时器）");
+    m.dispose();
+  } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
   }
-  check(m.getState() === "executing", "反复续期后仍在 executing（未被回退）", `已过 ${Date.now() - t0}ms`);
-  m.dispose();
 
   // 超时回收语义：直接驱动私有 watchdog 计时器不可行，改为断言 armWatchdog 存在且
   // 状态变更会重新计时（源码级，见第 1 节 timeoutMsFor 断言）。
@@ -107,7 +154,8 @@ console.log("\n== 3. 工具输出裁剪（模型不再只看到半截）==");
     "已移除单向 slice(0, 8000) 截断");
   check(/fitToolOutputForModel/.test(src), "输出改走 fitToolOutputForModel");
 
-  // 源码级断言：保留头尾 + 显式告知裁剪量
+  // 源码级断言：保留头尾 + 显式告知裁剪量。
+  // 注意：以下三条只证明**源码里存在该实现结构**，不证明其运行时行为正确。
   const fnStart = src.indexOf("private fitToolOutputForModel");
   const fnBody = fnStart >= 0 ? src.slice(fnStart, fnStart + 900) : "";
   check(/slice\(0, head\)/.test(fnBody) && /slice\(text\.length - tail\)/.test(fnBody),
@@ -115,21 +163,15 @@ console.log("\n== 3. 工具输出裁剪（模型不再只看到半截）==");
   check(/已省略/.test(fnBody), "显式告知模型被裁剪了多少字（不再静默丢尾巴）");
   check(/0\.6/.test(fnBody), "按 6:4 分配头尾，错误信息在结尾得以保留");
 
-  // 用同样算法做一次行为验证
-  const fit = (output, limit = 12000) => {
-    const text = output ?? "";
-    if (text.length <= limit) return text;
-    const head = Math.floor(limit * 0.6);
-    const tail = limit - head;
-    const omitted = text.length - limit;
-    return text.slice(0, head) + `\n\n【输出过长，中间 ${omitted} 个字符已省略；命令开头与结尾的错误信息已保留。】\n\n` + text.slice(text.length - tail);
-  };
-  const long = "START_CMD\n" + "x".repeat(50000) + "\nERROR: build failed at line 42";
-  const out = fit(long);
-  check(out.startsWith("START_CMD"), "长输出的开头（命令）被保留");
-  check(out.includes("ERROR: build failed"), "长输出的结尾（真实错误）被保留 —— 这是旧实现会丢掉的部分");
-  check(out.includes("38041"), "裁剪量被如实告知模型", "omitted=38041");
-  check(fit("short") === "short", "短输出原样返回，不做无意义裁剪");
+  // R-46：原实现把 fit() 裁剪算法在脚本里重写了一遍 —— 验证的是脚本自己，
+  // 生产函数 fitToolOutputForModel 一旦漂移根本测不出来（同义反复）。
+  // 改为直接调用真实生产函数是最理想的，但该函数在 orchestrator.ts 中是 `private`，
+  // 既未导出为独立函数，require 整个 orchestrator 单例又会拉入 electron / realtime /
+  // mcp 等重型依赖（本脚本设计为离线、不启动 Electron），无法在 CI 稳定调用。
+  // 因此按约定降级为「显式声明未覆盖」：生产函数未导出，本项退化为上面的正则存在性
+  // 检查，不再用重写算法冒充行为验证。
+  markUncovered("fitToolOutputForModel 的运行时行为（头尾保留、裁剪量告知、短输出原样返回）",
+    "生产函数未导出（private），离线无法调用；本项退化为正则存在性检查，行为未覆盖");
 }
 
 /* ============ 4. executing 不再被 response.done 兜底/打断影响 ============ */
@@ -178,5 +220,9 @@ console.log("\n== 5. 状态机 basics 回归（确保改动没破坏既有语义
   m.dispose();
 }
 
-console.log(`\n结果：${pass} 通过，${fail} 失败`);
+console.log(`\n结果：${pass} 通过，${fail} 失败${uncovered ? `，${uncovered} 项显式未覆盖` : ""}`);
+if (uncoveredItems.length) {
+  console.log("未覆盖项（不计入通过/失败，需人工或集成测试确认）：");
+  for (const u of uncoveredItems) console.log("  - " + u);
+}
 if (fail) { console.log("失败项：\n  - " + failures.join("\n  - ")); process.exit(1); }

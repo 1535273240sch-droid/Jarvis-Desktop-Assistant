@@ -36,10 +36,23 @@ import type { AssistantState } from "../common/types";
 
 const isSelfTest = process.argv.includes("--selftest") || process.argv.includes("--test");
 
-// 1) WebGPU 开关
-app.commandLine.appendSwitch("enable-unsafe-webgpu");
-app.commandLine.appendSwitch("ignore-gpu-blocklist");
-app.commandLine.appendSwitch("enable-gpu-rasterization");
+// 1) WebGPU / GPU 兼容开关（按配置启用，必须早于 ready）
+//
+// configManager 在 config.ts 模块导入时**同步**完成构造与 config.json 读取
+// （见 config.ts 的 ConfigManager 构造函数：this.config = this.load()），
+// 因此这里能在 app ready 之前同步拿到配置，满足 Chromium 命令行开关必须早于 ready 的硬要求。
+// gpuCompatFlags 的默认值定义在 config.ts 的 DEFAULT_CONFIG（true）；
+// 这里仍用 ?? true 兜底，兼容旧版 config.json 中尚无该字段的情况。
+const GPU_COMPAT_FLAGS_ENABLED = configManager.get().gpuCompatFlags ?? true;
+if (GPU_COMPAT_FLAGS_ENABLED) {
+  app.commandLine.appendSwitch("enable-unsafe-webgpu");
+  app.commandLine.appendSwitch("ignore-gpu-blocklist");
+  app.commandLine.appendSwitch("enable-gpu-rasterization");
+} else {
+  logger.warn(
+    "[GPU] gpuCompatFlags=false：已跳过 WebGPU 兼容开关（enable-unsafe-webgpu / ignore-gpu-blocklist / enable-gpu-rasterization）"
+  );
+}
 // 允许在无音频设备的环境下也能启动（避免 CI/静默环境崩溃）
 app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
 
@@ -58,6 +71,27 @@ if (!gotLock) {
 let orbWindow: BrowserWindow | null = null;
 let panelWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
+
+/** 面板尚未加载完时暂存的系统提示，待 did-finish-load 后补发（否则早期提示会丢） */
+const pendingPanelNotices: string[] = [];
+
+/** 向面板广播一条系统提示；面板未就绪时暂存，加载完成后补发（复用 notice 广播机制） */
+function notifyPanel(text: string): void {
+  const p = panelWindow;
+  if (p && !p.isDestroyed() && !p.webContents.isLoading()) {
+    p.webContents.send(IPC.CHAT_MESSAGE, { systemNotice: text });
+  } else {
+    pendingPanelNotices.push(text);
+  }
+}
+
+/** 球体渲染进程退出次数：用于判断是否反复崩溃（GPU 崩溃的真实形态） */
+let orbRenderGoneCount = 0;
+/** GPU 兼容开关相关提示只发一次，避免刷屏 */
+let gpuCompatHintSent = false;
+/** 面板渲染进程重建次数与上限：避免 GPU 持续崩溃导致无限重建 */
+let panelRecoverAttempts = 0;
+const PANEL_RECOVER_MAX = 3;
 
 /**
  * 解析悬浮球基准尺寸。
@@ -141,6 +175,17 @@ function createPanelWindow(): BrowserWindow {
   });
 
   win.loadURL("app://panel/panel.html");
+
+  // 面板加载完成后补发启动早期暂存的提示（例如急停热键注册失败），否则这些提示会丢。
+  win.webContents.on("did-finish-load", () => {
+    // 面板成功加载即视为恢复成功：清零崩溃重建计数，避免生命周期内累计 3 次后
+    // 再也无法自动重建（计数应表示「连续失败次数」，而非历史总数）。
+    panelRecoverAttempts = 0;
+    const pending = pendingPanelNotices.splice(0);
+    for (const text of pending) {
+      if (!win.isDestroyed()) win.webContents.send(IPC.CHAT_MESSAGE, { systemNotice: text });
+    }
+  });
 
   win.on("close", (e) => {
     // 关闭面板时最小化到托盘，而不是退出应用。
@@ -426,7 +471,21 @@ async function runSelfTest(): Promise<void> {
   check(!emergencyStopped(), "全局急停初始为未触发态", `触发次数=${getTriggerCount()}`);
   const authState = isAuthorized("mouse-control");
   logger.info(`  · 鼠标控制授权状态：${authState ? "已授权" : "未授权（首次使用需用户确认）"}`);
-  check(true, "首次授权门就绪（未授权时桌面控制会被拦截）");
+  // 授权门真实状态：逐项 isAuthorized() 必须与授权总览一致 ——
+  // 已生效能力为 true、已撤回能力为 false；未授权/已撤回时 desktop-control 会拦截并拒绝。
+  const authzOverview = getAuthzState();
+  // scope 统一表示「当前生效（已授予且未撤回）」的能力；撤回项由 revoked 承载。
+  const effectiveCaps = authzOverview.state === "none" ? [] : authzOverview.scope;
+  const revokedCaps = authzOverview.state === "revoked" ? authzOverview.revoked : [];
+  const gateConsistent =
+    authzOverview.state === "none"
+      ? !isAuthorized("mouse-control") && !isAuthorized("screen-capture") && !isAuthorized("keyboard-control")
+      : effectiveCaps.every((c) => isAuthorized(c)) && revokedCaps.every((c) => !isAuthorized(c));
+  check(
+    gateConsistent,
+    "授权门真实状态一致（未授权/已撤回能力会被拦截）",
+    `state=${authzOverview.state}, 生效=${effectiveCaps.join(",") || "无"}`
+  );
 
   // 10) 面板窗口
   check(Boolean(panelWindow && !panelWindow.isDestroyed()), "聊天面板窗口已创建");
@@ -569,7 +628,7 @@ app.whenReady().then(async () => {
   if (authz.state === "granted" || authz.state === "partial") {
     logger.info(`[Authorization] 桌面能力已默认开启（屏幕录制/鼠标/键盘）；当前授权：${authz.scope.join(", ")}`);
   } else if (authz.state === "revoked") {
-    logger.warn(`[Authorization] 桌面能力已默认开启；已撤回的能力保持停用：${authz.scope.join(", ")}（重启不会自动恢复，需在面板重新授权）`);
+    logger.warn(`[Authorization] 桌面能力已默认开启；已撤回的能力保持停用：${authz.revoked.join(", ")}（重启不会自动恢复，需在面板重新授权）`);
   } else {
     logger.info("[Authorization] 尚未授权桌面能力；首次使用桌面能力时请在面板「设置 → 能力授权」中开启");
   }
@@ -580,7 +639,7 @@ app.whenReady().then(async () => {
   // 4) 编排器、任务引擎与 IPC
   orchestrator.init(() => panelWindow);
   taskRunner.init(() => panelWindow);
-  registerIpcHandlers({
+  const ipcRuntime = registerIpcHandlers({
     getOrbWindow: () => orbWindow,
     getPanelWindow: () => panelWindow,
     togglePanel,
@@ -593,6 +652,11 @@ app.whenReady().then(async () => {
   // 4b) 全局急停热键（T07 第 6 节：Ctrl+Alt+X 中断一切自动化）
   if (!armEmergencyStop()) {
     logger.warn("全局急停热键注册失败（可能被占用），桌面控制仍可用但无快捷键中断");
+    // 注册失败必须让用户知道（原实现只写日志，用户完全不知快捷键不可用）。
+    // 除日志外广播到面板，并提示仍可用的替代入口（面板/托盘的停止按钮）。
+    notifyPanel(
+      `⚠️ 全局急停热键（${configManager.get().emergencyStopAccelerator || "Control+Alt+X"}）注册失败，可能已被其他程序占用。桌面控制仍可用，但无法用快捷键中断；可改用面板/托盘的「停止所有桌面任务」按钮，或修改配置中的 emergencyStopAccelerator 后重启。`
+    );
   }
 
   // 5) 加载球体（必须用 app://，不能用 file://）
@@ -665,9 +729,35 @@ app.whenReady().then(async () => {
   // 8) 崩溃与退出
   orbWindow.webContents.on("render-process-gone", (_e, d) => {
     logger.error("球体渲染进程异常退出:", d);
+    orbRenderGoneCount += 1;
+
+    // GPU 兼容开关生效且反复崩溃时，提示用户可关闭该选项后重启（复用 notice 广播）。
+    if (GPU_COMPAT_FLAGS_ENABLED && !gpuCompatHintSent && orbRenderGoneCount >= 2) {
+      gpuCompatHintSent = true;
+      notifyPanel(
+        '⚠️ 检测到悬浮球渲染进程反复崩溃，可能与强制启用的 GPU 兼容开关有关。可在配置文件 config.json 中把 "gpuCompatFlags" 设为 false 后重启应用（关闭 WebGPU 兼容开关）。'
+      );
+    }
+
+    // GPU 崩溃后渲染层已无法自行上报 ORB_ON_ERROR，必须由宿主兜底重载，否则悬浮球永久消失。
+    // scheduleOrbRecovery 自带 6 次上限与面板提示，天然避免无限重建。
+    ipcRuntime.scheduleOrbRecovery(`渲染进程退出（reason=${d.reason}, exitCode=${d.exitCode}）`);
   });
   panelWindow.webContents.on("render-process-gone", (_e, d) => {
     logger.error("面板渲染进程异常退出:", d);
+    // 面板承载对话与设置，渲染进程崩溃后窗口不会自行恢复；有限次重建，避免 GPU 持续崩溃时无限循环。
+    if (panelRecoverAttempts >= PANEL_RECOVER_MAX) {
+      logger.warn(`[Panel] 面板渲染进程反复退出，已达重建上限（${PANEL_RECOVER_MAX} 次），停止自动重建`);
+      return;
+    }
+    panelRecoverAttempts += 1;
+    setTimeout(() => {
+      const p = panelWindow;
+      if (p && !p.isDestroyed()) {
+        logger.warn(`[Panel] 重建面板页面（第 ${panelRecoverAttempts} 次）`);
+        p.webContents.reload();
+      }
+    }, 1000);
   });
 });
 

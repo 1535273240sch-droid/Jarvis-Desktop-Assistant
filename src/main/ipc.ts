@@ -8,7 +8,6 @@ import { orchestrator } from "./orchestrator";
 import { realtimeClient } from "./realtime";
 import { mcpClient } from "./mcp";
 import { visionManager } from "./vision";
-import { sessionStore } from "./session-store";
 import { stateMachine } from "./state";
 import { memoryStore } from "./memory";
 import { externalMcp } from "./mcp-external";
@@ -35,7 +34,36 @@ interface Deps {
   quit: () => void;
 }
 
-export function registerIpcHandlers(deps: Deps): void {
+/* ---------------- 入参校验小工具 ----------------
+ * 渲染进程不可信：转发给主进程模块或网络前先做形状/数值校验，
+ * 拦截 NaN、非字符串、超大载荷等非法输入。风格对齐 orb-control.ts 的 clamp 白名单写法。 */
+
+/** 有限数值校验：仅接受真正的 number，拒绝 NaN / Infinity / 字符串数字 */
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === "number" && Number.isFinite(v);
+}
+
+/** 球体错误信息注入日志/状态机/面板前的长度上限 */
+const MAX_ERROR_MSG_LEN = 500;
+/** 单个上行 PCM base64 分片的长度上限（约 750KB 原始 PCM，远大于 24kHz 单声道一帧） */
+const MAX_PCM_BASE64_LEN = 1_000_000;
+/** base64 字符集（允许尾部 padding） */
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
+
+/** 把任意输入收敛为有长度上限的字符串，避免超长文本注入日志与状态机 */
+function sanitizeMessage(v: unknown, max = MAX_ERROR_MSG_LEN): string {
+  const s = typeof v === "string" ? v : String(v ?? "");
+  return s.length > max ? `${s.slice(0, max)}…（已截断）` : s;
+}
+
+/** 校验上行音频分片：必须是字符串、长度受限、且为 base64 字符集 */
+function isValidPcmBase64(v: unknown): v is string {
+  if (typeof v !== "string" || v.length === 0) return false;
+  if (v.length > MAX_PCM_BASE64_LEN) return false;
+  return BASE64_RE.test(v);
+}
+
+export function registerIpcHandlers(deps: Deps): { scheduleOrbRecovery: (reason: string) => void } {
   /* ---------------- 球体窗口事件 ---------------- */
 
   // 球体渲染失败后的宿主侧兜底恢复。
@@ -129,16 +157,18 @@ export function registerIpcHandlers(deps: Deps): void {
   });
 
   ipcMain.on(IPC.ORB_ON_ERROR, (_e, msg: string) => {
-    logger.error(`[IPC] 球体渲染器报错：${msg}`);
-    stateMachine.transition("error", `渲染错误：${msg}`);
+    // 渲染进程不可信：先截断再注入日志 / 状态机 reason / 面板提示，避免超长文本刷爆日志。
+    const safeMsg = sanitizeMessage(msg);
+    logger.error(`[IPC] 球体渲染器报错：${safeMsg}`);
+    stateMachine.transition("error", `渲染错误：${safeMsg}`);
     const p = deps.getPanelWindow();
     if (p && !p.isDestroyed()) {
       p.webContents.send(IPC.CHAT_MESSAGE, {
-        systemNotice: `⚠️ 球体渲染异常：${msg}\n（若为 WebGPU 相关，请检查显卡驱动）`,
+        systemNotice: `⚠️ 球体渲染异常：${safeMsg}\n（若为 WebGPU 相关，请检查显卡驱动）`,
       });
     }
     // 渲染器自身重建失败或 GPU 进程级故障时，由宿主重载页面兜底。
-    scheduleOrbRecovery(msg);
+    scheduleOrbRecovery(safeMsg);
   });
 
   /* ---------------- 球体控制 ---------------- */
@@ -188,6 +218,12 @@ export function registerIpcHandlers(deps: Deps): void {
   ipcMain.on(IPC.WINDOW_START_DRAG, (_e, data: { screenX: number; screenY: number }) => {
     const win = deps.getOrbWindow();
     if (!win || win.isDestroyed()) return;
+    // 渲染进程不可信：screenX/screenY 必须是有限数值，否则 offset 变成 NaN，
+    // 后续 setPosition(NaN) 会让球体从屏幕上消失。
+    if (!data || !isFiniteNumber(data.screenX) || !isFiniteNumber(data.screenY)) {
+      logger.warn(`[IPC] 忽略非法的拖拽起点：${JSON.stringify(data)}`);
+      return;
+    }
     dragging = true;
     const [wx, wy] = win.getPosition();
     dragOffset = { x: data.screenX - wx, y: data.screenY - wy };
@@ -240,7 +276,18 @@ export function registerIpcHandlers(deps: Deps): void {
 
   /* ---------------- 音频（主进程只做转发与状态机联动） ---------------- */
 
-  ipcMain.on(IPC.AUDIO_CHUNK_UP, (_e, pcmBase64: string) => {
+  // 非法音频分片只在前几次告警，避免异常渲染进程高频发送时刷爆日志。
+  let invalidAudioChunkLogged = 0;
+  ipcMain.on(IPC.AUDIO_CHUNK_UP, (_e, pcmBase64: unknown) => {
+    // 渲染进程不可信：校验类型/长度/base64 字符集后再转发给 ws，避免非法载荷直接上网。
+    if (!isValidPcmBase64(pcmBase64)) {
+      if (invalidAudioChunkLogged < 3) {
+        invalidAudioChunkLogged += 1;
+        const len = typeof pcmBase64 === "string" ? pcmBase64.length : "非字符串";
+        logger.warn(`[IPC] 丢弃非法音频分片（长度=${len}）`);
+      }
+      return;
+    }
     realtimeClient.appendAudio(pcmBase64);
   });
 
@@ -546,4 +593,6 @@ export function registerIpcHandlers(deps: Deps): void {
   });
 
   logger.info("[IPC] 全部通道已注册");
+  // 把球体宿主恢复入口暴露给主进程入口（index.ts）：render-process-gone 需要它兜底重建。
+  return { scheduleOrbRecovery };
 }

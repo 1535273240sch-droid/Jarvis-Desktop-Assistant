@@ -37,7 +37,11 @@ export function createWebExport(
   initialState: OrbStateName,
 ): string {
   const stateSeeds = createStateSeeds(configuration);
-  const shaderLiteral = JSON.stringify(orbShaderSource);
+  // 归一化被嵌入着色器源的行尾，保证产物在 CRLF/LF 检出下一致。
+  // 工作区若为 CRLF（core.autocrlf=true），vendor 源会把 \r\n 原样嵌进产物，
+  // 使 orb.html 内嵌字符串出现字面 \r\n，与 LF 环境生成结果不一致、破坏构建幂等性。
+  // 只归一化被嵌入的字符串，不修改任何源文件本身的行尾。
+  const shaderLiteral = JSON.stringify(orbShaderSource.replace(/\r\n/g, "\n"));
 
   return `<!doctype html>
 <html lang="en">

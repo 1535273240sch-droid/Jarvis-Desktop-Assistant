@@ -3,24 +3,28 @@ name: Build Windows Installer
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
+# 默认最小权限：构建/验证 job 只需读取仓库内容。
+# 发布 Release 所需的 contents: write 仅授予独立的 release job。
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: windows-latest
-    env:
-      # 可选代码签名：配置仓库 Secrets WIN_CSC_LINK / WIN_CSC_KEY_PASSWORD 后自动签名
-      CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
-      CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.VERSION }}
     steps:
       - name: Checkout source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: 22
           cache: npm
@@ -117,7 +121,12 @@ jobs:
       - name: Verify long-task execution continuity
         run: node scripts/run.mjs verify-execution
 
+      # 可选代码签名：仅在非 PR 构建注入密钥。PR 事件不读取签名密钥，
+      # 只产出未签名安装包用于构建/回归校验；发布用的签名产物走 push 事件。
       - name: Package Windows installer (NSIS) + update metadata
+        env:
+          CSC_LINK: ${{ github.event_name != 'pull_request' && secrets.WIN_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
         run: npm run dist -- --publish never
 
       - name: Verify update metadata matches stamped version
@@ -141,29 +150,46 @@ jobs:
           fi
           echo "OK: latest.yml version=$STAMPED with sha512"
 
-      - name: Upload installer + update metadata as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: Jarvis-Setup-v${{ steps.version.outputs.VERSION }}
-          path: |
-            release/*.exe
-            release/latest.yml
-            release/*.blockmap
-          if-no-files-found: error
-
       - name: Prepare release notes from template
         shell: bash
         run: |
           sed "s/__VERSION__/${{ steps.version.outputs.VERSION }}/g" .github/release-body-template.md > release-body.md
           echo "Generated release-body.md";
 
+      # 安装包、更新元数据与发布说明一并上传，供独立的 release job 取用。
+      - name: Upload installer + update metadata as artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        with:
+          name: Jarvis-Setup-v${{ steps.version.outputs.VERSION }}
+          path: |
+            release/*.exe
+            release/latest.yml
+            release/*.blockmap
+            release-body.md
+          if-no-files-found: error
+          retention-days: 14
+
+  # 独立发布 job：仅在非 PR 事件运行，独占 contents: write 权限。
+  # PR 场景下整个 job 被跳过，既不发布 Release，也不触碰签名密钥。
+  release:
+    needs: build
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download build artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+        with:
+          name: Jarvis-Setup-v${{ needs.build.outputs.version }}
+
       # 不再使用 update_release 覆盖同一个 tag：
       # 每次构建生成独立 tag，旧版用户的增量更新才不会因资产被替换而失败。
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2.6.2
         with:
-          tag_name: v${{ steps.version.outputs.VERSION }}
-          name: "Jarvis v${{ steps.version.outputs.VERSION }}"
+          tag_name: v${{ needs.build.outputs.version }}
+          name: "Jarvis v${{ needs.build.outputs.version }}"
           body_path: release-body.md
           files: |
             release/*.exe

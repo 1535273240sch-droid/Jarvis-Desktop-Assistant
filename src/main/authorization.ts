@@ -28,22 +28,7 @@ export type AuthzState =
   | { state: "none" }
   | { state: "granted"; scope: Capability[]; grantedAt: string }
   | { state: "partial"; scope: Capability[]; grantedAt: string }
-  | { state: "revoked"; scope: Capability[]; revokedAt: string; remaining: Capability[] };
-
-export const CONSENT_TEXT = `Jarvis 需要你的明确授权才能使用以下高敏感能力：
-
-1. 屏幕录制：截取你的屏幕或当前窗口画面，用于「看屏幕」类请求
-2. 鼠标控制：移动并点击鼠标
-3. 键盘控制：向当前窗口输入文字或按键
-
-说明：
-· 截图仅在你主动要求（或说话触发）时发生，不会持续录屏
-· 所有截图、点击、输入都会写入本地审计日志
-· 你可以随时按 Ctrl+Alt+X 全局急停，中断一切自动化操作
-· 密码、验证码等敏感输入默认禁止由助手代填
-· 你可以在设置中随时撤回本次授权（撤回后重启也不会自动恢复）
-
-是否同意授权以上能力？`;
+  | { state: "revoked"; scope: Capability[]; revokedAt: string; revoked: Capability[]; remaining: Capability[] };
 
 function userDataDir(): string {
   try {
@@ -102,14 +87,21 @@ export function isAuthorized(cap: Capability): boolean {
   return true;
 }
 
-/** 面板/诊断用的授权总览 */
+/**
+ * 面板/诊断用的授权总览。
+ *
+ * scope 语义统一为「当前生效的能力集合」（= 已授予 且 未被撤回），
+ * 各状态一致，不再在 revoked 态返回被撤回项。撤回信息由 revoked / remaining 承载：
+ *   - revoked：被撤回的能力；
+ *   - remaining：当前仍生效的能力（与 scope 相同，保留字段兼容既有调用方）。
+ */
 export function getAuthzState(): AuthzState {
   const rev = getRevocation();
   const rec = getAuthorization();
   const scope = rec?.scope ?? [];
   const remaining = rev ? scope.filter((c) => !rev.revoked.includes(c)) : scope;
   if (rev && rev.revoked.length > 0) {
-    return { state: "revoked", scope: rev.revoked, revokedAt: rev.revokedAt, remaining };
+    return { state: "revoked", scope: remaining, revokedAt: rev.revokedAt, revoked: rev.revoked, remaining };
   }
   if (!rec) return { state: "none" };
   return remaining.length === scope.length && scope.length > 0
@@ -184,11 +176,6 @@ export function migrateLegacyAuthorization(): void {
   } catch (e) {
     logger.warn("[Authorization] 旧授权迁移失败:", e);
   }
-}
-
-/** selftest 等显式诊断场景使用：整体授予三类高敏能力（不含 external-send） */
-export function grantDiagnosticScope(): void {
-  grantAuthorization(["screen-capture", "mouse-control", "keyboard-control"]);
 }
 
 /** 桌面操作类默认能力：屏幕录制 / 鼠标 / 键盘。与对外发送（external-send）严格分列 */
