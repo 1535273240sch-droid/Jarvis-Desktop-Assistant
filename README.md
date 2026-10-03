@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![Version](https://img.shields.io/badge/Version-v1.5.37-blue?style=flat-square)
+![Version](https://img.shields.io/badge/Version-v1.5.x-blue?style=flat-square)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%20%7C%2011%20(64--bit)-0078D4?style=flat-square&logo=windows11)
 ![Electron](https://img.shields.io/badge/Electron-34.0-47848F?style=flat-square&logo=electron)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?style=flat-square&logo=typescript)

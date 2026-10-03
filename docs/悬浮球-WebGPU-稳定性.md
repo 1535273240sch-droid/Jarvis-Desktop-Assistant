@@ -1,6 +1,6 @@
 # 悬浮球 WebGPU 稳定性
 
-悬浮球是 WebGPU（WGSL）流体玻璃球。本文汇总它在 v1.5.37（main 分支，见仓库 tag）下的状态、多主题与音频动态、设备丢失自愈、WebGPU 自检隔离、构建三层同步与回归测试。
+悬浮球是 WebGPU（WGSL）流体玻璃球。本文汇总它在 v1.5.x（补丁号由 CI 构建流水号生成；当前发布版本见仓库 Releases）下的状态、多主题与音频动态、设备丢失自愈、WebGPU 自检隔离、构建三层同步与回归测试。
 
 > 本文合并自 `docs/TODO-ORB-WEBGPU.md`、`docs/ORB-WEBGPU-RECOVERY.md`、`docs/ORB_CHANGES.md` 三份旧文档；**那三份已删除**，旧链接请一律改指本文。
 
